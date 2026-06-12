@@ -76,13 +76,17 @@ local function setupEnemy(npc)
 				print(string.format("[%s] Distance to %s: %.2f | AttackRange: %.2f",
 					npc.Name, currentTarget.Name, dist, data.AttackDistance))
 
+				-- in EnemyManager, replace the isInRange block with this
 				if DistanceManager.isInRange(npc, currentTarget, data) then
 					if isPathfinding then
 						AI.Stop(npc)
 						isPathfinding = false
 					end
-					-- call this every tick, not just on transition
-					humanoid:Move(Vector3.zero, false)
+					-- overwrite WalkToPoint directly instead of zeroing velocity
+					local npcRoot = npc:FindFirstChild("HumanoidRootPart")
+					if npcRoot then
+						humanoid:MoveTo(npcRoot.Position)
+					end
 					VisionSystem.faceTarget(npc, currentTarget)
 					CombatManager.tryAttack(npc, currentTarget, data)
 				else
@@ -90,6 +94,7 @@ local function setupEnemy(npc)
 					if not isPathfinding then
 						AI.SmartPathfind(npc, currentTarget)
 						isPathfinding = true
+						print(string.format("[%s] Started pathfinding, dist: %.2f", npc.Name, dist))
 					end
 				end
 			end
