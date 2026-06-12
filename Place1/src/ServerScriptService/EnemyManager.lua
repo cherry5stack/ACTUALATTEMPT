@@ -1,19 +1,23 @@
--- EnemyManager Script in ServerScriptService
-
 local rs = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
+
+
+local VisionSystem = require(rs.VisionSystem)
 local AI = require(rs.Forbidden.AI)
 local EnemyData = require(rs.EnemyData)
+local TargetingManager = require(rs.TargetingManager)
+local DistanceManager = require(rs.DistanceManager)
+local CombatManager = require(rs.CombatManager)
 
-local enemiesFolder = workspace:WaitForChild("Enemies") -- put all your NPCs in a folder
+local enemiesFolder = workspace:WaitForChild("Enemies")
 
 local function setupEnemy(npc)
 	local humanoid = npc:FindFirstChildOfClass("Humanoid")
 	local enemyTypeValue = npc:FindFirstChild("EnemyType")
 
-	if not humanoid or not enemyTypeValue then 
+	if not humanoid or not enemyTypeValue then
 		warn("Enemy " .. npc.Name .. " is missing Humanoid or EnemyType")
-		return 
+		return
 	end
 
 	local data = EnemyData[enemyTypeValue.Value]
@@ -30,78 +34,25 @@ local function setupEnemy(npc)
 	-- setup AI
 	local config = AI.GetConfig(npc)
 	config.Tracking.Enabled = true
+	config.Tracking.CollinearTargetPositionOffset = 0
 	config.AgentInfo.AgentRadius = data.AgentRadius
 	config.AgentInfo.AgentHeight = data.AgentHeight
 	AI.InsertAntiLag(npc)
 
-	-- run this enemy in its own thread so it doesnt block others
+	-- run enemy loop in its own thread
 	task.spawn(function()
-		local lastAttack = 0
 		local currentTarget = nil
 
-		local function getClosestPlayer()
-			local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-			if not npcRoot then return nil end
-
-			local closest, closestDist = nil, math.huge
-			for _, player in Players:GetPlayers() do
-				local char = player.Character
-				if not char then continue end
-				local root = char:FindFirstChild("HumanoidRootPart")
-				if not root then continue end
-				local dist = (root.Position - npcRoot.Position).Magnitude
-				if dist < closestDist and dist < data.DetectionRange then
-					closest = player
-					closestDist = dist
-				end
-			end
-			return closest
-		end
-
-		local function tryAttack(target)
-			local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-			if not npcRoot then return end
-			local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
-			if not targetRoot then return end
-
-			local dist = (npcRoot.Position - targetRoot.Position).Magnitude
-			if dist <= data.AttackDistance and os.clock() - lastAttack >= data.AttackCooldown then
-				lastAttack = os.clock()
-
-				local params = OverlapParams.new()
-				params.FilterDescendantsInstances = {npc}
-				params.FilterType = Enum.RaycastFilterType.Exclude
-
-				local hits = workspace:GetPartBoundsInBox(
-					npcRoot.CFrame,
-					data.AttackHitboxSize,
-					params
-				)
-
-				local alreadyHit = {} -- track who we already damaged this attack
-
-				for _, hit in hits do
-					local character = hit.Parent
-					local hitHumanoid = character:FindFirstChildOfClass("Humanoid")
-
-					-- only damage each character once per attack
-					if hitHumanoid and character ~= npc and not alreadyHit[character] then
-						alreadyHit[character] = true
-						hitHumanoid:TakeDamage(data.Damage)
-						print("Hit: " .. character.Name .. " for " .. data.Damage .. " damage")
-					end
-				end
-			end
-		end
-
-		-- wait until at least one player is in
+		-- wait for at least one player
 		while #Players:GetPlayers() == 0 do task.wait(1) end
-		task.wait(2) -- give characters time to load
+		task.wait(2)
 
 		while npc.Parent ~= nil and humanoid.Health > 0 do
 			task.wait(0.1)
 
-			local newTarget = getClosestPlayer()
+			local newTarget = TargetingManager.getTarget(npc, data)
+
+			-- target changed, update pathfinding
 			if newTarget ~= currentTarget then
 				currentTarget = newTarget
 				if currentTarget then
@@ -110,14 +61,25 @@ local function setupEnemy(npc)
 					AI.Stop(npc)
 				end
 			end
-			if currentTarget then
 
-				tryAttack(currentTarget)
+			if currentTarget then
+				local dist = DistanceManager.getDistance(npc, currentTarget)
+				print(string.format("[%s] Distance to %s: %.2f | AttackRange: %.2f", npc.Name, currentTarget.Name, dist, data.AttackDistance))
+
+				if DistanceManager.isInRange(npc, currentTarget, data) then
+					AI.Stop(npc)
+					VisionSystem.faceTarget(npc, currentTarget) -- face the player while attacking
+					CombatManager.tryAttack(npc, currentTarget, data)
+				else
+					VisionSystem.stopFacing(npc) -- stop forcing rotation when chasing
+					AI.SmartPathfind(npc, currentTarget)
+				end
 			end
 		end
 
 		-- cleanup when dead
 		AI.Stop(npc)
+		CombatManager.cleanup(npc)
 	end)
 end
 
@@ -126,8 +88,8 @@ for _, npc in enemiesFolder:GetChildren() do
 	setupEnemy(npc)
 end
 
--- setup any enemies added later (for spawning systems)
+-- setup enemies added later
 enemiesFolder.ChildAdded:Connect(function(npc)
-	task.wait() -- wait a frame for the model to fully load
+	task.wait()
 	setupEnemy(npc)
 end)
