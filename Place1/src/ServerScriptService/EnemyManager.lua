@@ -40,10 +40,14 @@ local function setupEnemy(npc)
 	AI.InsertAntiLag(npc)
 
 	-- run enemy loop in its own thread
+	-- replace your current loop with this
+	-- replace your current loop with this
 	task.spawn(function()
 		local currentTarget = nil
+		local isPathfinding = false
+		local swapTimer = 0
+		local SWAP_DELAY = 1
 
-		-- wait for at least one player
 		while #Players:GetPlayers() == 0 do task.wait(1) end
 		task.wait(2)
 
@@ -52,32 +56,45 @@ local function setupEnemy(npc)
 
 			local newTarget = TargetingManager.getTarget(npc, data)
 
-			-- target changed, update pathfinding
+			-- mimic SwapTargetTimer, don't instantly swap
 			if newTarget ~= currentTarget then
-				currentTarget = newTarget
-				if currentTarget then
-					AI.SmartPathfind(npc, currentTarget)
-				else
-					AI.Stop(npc)
+				if newTarget == nil or os.clock() - swapTimer >= SWAP_DELAY then
+					currentTarget = newTarget
+					swapTimer = os.clock()
+					isPathfinding = false
+					if currentTarget then
+						AI.SmartPathfind(npc, currentTarget)
+						isPathfinding = true
+					else
+						AI.Stop(npc)
+					end
 				end
 			end
 
 			if currentTarget then
 				local dist = DistanceManager.getDistance(npc, currentTarget)
-				print(string.format("[%s] Distance to %s: %.2f | AttackRange: %.2f", npc.Name, currentTarget.Name, dist, data.AttackDistance))
+				print(string.format("[%s] Distance to %s: %.2f | AttackRange: %.2f",
+					npc.Name, currentTarget.Name, dist, data.AttackDistance))
 
 				if DistanceManager.isInRange(npc, currentTarget, data) then
-					AI.Stop(npc)
-					VisionSystem.faceTarget(npc, currentTarget) -- face the player while attacking
+					if isPathfinding then
+						AI.Stop(npc)
+						isPathfinding = false
+					end
+					-- call this every tick, not just on transition
+					humanoid:Move(Vector3.zero, false)
+					VisionSystem.faceTarget(npc, currentTarget)
 					CombatManager.tryAttack(npc, currentTarget, data)
 				else
-					VisionSystem.stopFacing(npc) -- stop forcing rotation when chasing
-					AI.SmartPathfind(npc, currentTarget)
+					VisionSystem.stopFacing(npc)
+					if not isPathfinding then
+						AI.SmartPathfind(npc, currentTarget)
+						isPathfinding = true
+					end
 				end
 			end
 		end
 
-		-- cleanup when dead
 		AI.Stop(npc)
 		CombatManager.cleanup(npc)
 	end)
