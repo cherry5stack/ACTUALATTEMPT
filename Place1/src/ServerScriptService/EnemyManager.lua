@@ -1,55 +1,48 @@
 local rs = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 
-local VisionSystem = require(rs.VisionSystem)
-local AI = require(rs.Forbidden.AI)
-local EnemyData = require(rs.EnemyData)
+local VisionSystem     = require(rs.VisionSystem)
+local AI               = require(rs.Forbidden.AI)
+local EnemyData        = require(rs.EnemyData)
 local TargetingManager = require(rs.TargetingManager)
-local DistanceManager = require(rs.DistanceManager)
-local CombatManager = require(rs.CombatManager)
+local DistanceManager  = require(rs.DistanceManager)
+local CombatManager    = require(rs.CombatManager)
+local StuckRecovery    = require(rs.StuckRecovery)
 
 local enemiesFolder = workspace:WaitForChild("Enemies")
 
 -- ─────────────────────────────────────────────
 -- DEBUG CONFIG  (flip to false before shipping)
 -- ─────────────────────────────────────────────
-local DEBUG = true
-local DEBUG_RAY_LIFETIME = 0.15   -- seconds each debug beam stays visible
-local DEBUG_PRINT_LOS    = true   -- print LOS result each tick
-local DEBUG_PRINT_DIST   = true   -- print distance each tick (you already had this)
+local DEBUG              = true
+local DEBUG_RAY_LIFETIME = 0.15
+local DEBUG_PRINT_LOS    = true
+local DEBUG_PRINT_DIST   = true
+
+local REPATH_INTERVAL    = 0.5
 
 -- ─────────────────────────────────────────────
 -- Helpers
 -- ─────────────────────────────────────────────
 
--- Draws a coloured line in the world for a short time so you can see the ray
 local function drawDebugRay(origin, direction, color)
 	if not DEBUG then return end
 	local len = direction.Magnitude
 	if len < 0.01 then return end
-
 	local midpoint = origin + direction * 0.5
 	local part = Instance.new("Part")
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CastShadow = false
-	part.Size = Vector3.new(0.05, 0.05, len)
-	part.CFrame = CFrame.lookAt(midpoint, origin + direction)
-	part.Color = color
-	part.Material = Enum.Material.Neon
-	part.Parent = workspace
-
+	part.Anchored    = true
+	part.CanCollide  = false
+	part.CanQuery    = false
+	part.CastShadow  = false
+	part.Size        = Vector3.new(0.05, 0.05, len)
+	part.CFrame      = CFrame.lookAt(midpoint, origin + direction)
+	part.Color       = color
+	part.Material    = Enum.Material.Neon
+	part.Parent      = workspace
 	game:GetService("Debris"):AddItem(part, DEBUG_RAY_LIFETIME)
 end
 
---[[
-	hasLineOfSight
-	Returns true if there is an unobstructed straight line between the NPC
-	and the target.  Ignores both the NPC model and the target's character
-	so we only block on actual geometry.
-]]
 local function hasLineOfSight(npc, target)
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return false end
@@ -57,7 +50,6 @@ local function hasLineOfSight(npc, target)
 	local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
 	if not targetRoot then return false end
 
-	-- Ray from NPC eye height → target eye height (avoids floor false-positives)
 	local eyeOffset = Vector3.new(0, 1.5, 0)
 	local origin    = npcRoot.Position + eyeOffset
 	local goal      = targetRoot.Position + eyeOffset
@@ -71,32 +63,26 @@ local function hasLineOfSight(npc, target)
 
 	if DEBUG then
 		if result then
-			-- RED  = blocked (wall/geometry in the way)
 			drawDebugRay(origin, direction, Color3.fromRGB(255, 60, 60))
 			if DEBUG_PRINT_LOS then
 				print(string.format(
 					"[%s] LOS BLOCKED by '%s' at %.2f studs (target %.2f studs away)",
-					npc.Name,
-					result.Instance:GetFullName(),
-					(result.Position - origin).Magnitude,
-					direction.Magnitude
+					npc.Name, result.Instance:GetFullName(),
+					(result.Position - origin).Magnitude, direction.Magnitude
 					))
 			end
 		else
-			-- GREEN = clear
 			drawDebugRay(origin, direction, Color3.fromRGB(60, 255, 60))
 			if DEBUG_PRINT_LOS then
 				print(string.format(
 					"[%s] LOS CLEAR to %s (%.2f studs)",
-					npc.Name,
-					target.Name,
-					direction.Magnitude
+					npc.Name, target.Name, direction.Magnitude
 					))
 			end
 		end
 	end
 
-	return result == nil  -- nil hit → nothing in the way → clear LOS
+	return result == nil
 end
 
 -- ─────────────────────────────────────────────
@@ -125,35 +111,57 @@ local function setupEnemy(npc)
 	local config = AI.GetConfig(npc)
 	config.Tracking.Enabled = true
 	config.Tracking.CollinearTargetPositionOffset = 0
-	config.AgentInfo.AgentRadius  = data.AgentRadius
-	config.AgentInfo.AgentHeight  = data.AgentHeight
+	config.AgentInfo.AgentRadius = data.AgentRadius
+	config.AgentInfo.AgentHeight = data.AgentHeight
 	AI.InsertAntiLag(npc)
 
 	task.spawn(function()
-		local currentTarget  = nil
-		local isPathfinding  = false
-		local swapTimer      = 0
-		local SWAP_DELAY     = 1
+		local currentTarget = nil
+		local isAttacking   = false
+		local swapTimer     = 0
+		local rePathTimer   = 0
+		local SWAP_DELAY    = 1
+
+		-- Each enemy gets its own isolated StuckRecovery instance
+		local stuck = StuckRecovery()
+
+		local function forceRepath()
+			AI.Stop(npc)
+			task.wait()
+			if currentTarget then
+				AI.SmartPathfind(npc, currentTarget)
+				rePathTimer = os.clock()
+				if DEBUG then
+					print(string.format("[%s] STUCK RECOVERY — forced Stop + SmartPathfind", npc.Name))
+				end
+			end
+			stuck.reset(npc)
+		end
 
 		while #Players:GetPlayers() == 0 do task.wait(1) end
 		task.wait(2)
+
+		stuck.reset(npc)
 
 		while npc.Parent ~= nil and humanoid.Health > 0 do
 			task.wait(0.1)
 
 			local newTarget = TargetingManager.getTarget(npc, data)
 
-			-- target-swap debounce
+			-- Target-swap debounce
 			if newTarget ~= currentTarget then
 				if newTarget == nil or os.clock() - swapTimer >= SWAP_DELAY then
 					currentTarget = newTarget
 					swapTimer     = os.clock()
-					isPathfinding = false
+					rePathTimer   = 0
+					isAttacking   = false
+					stuck.reset(npc)
+
 					if currentTarget then
 						AI.SmartPathfind(npc, currentTarget)
-						isPathfinding = true
 					else
 						AI.Stop(npc)
+						VisionSystem.stopFacing(npc)
 					end
 				end
 			end
@@ -169,44 +177,46 @@ local function setupEnemy(npc)
 				end
 
 				local inRange = DistanceManager.isInRange(npc, currentTarget, data)
-
-				-- ── KEY FIX ──────────────────────────────────────────────────────
-				-- Only stop pathfinding and stand still when BOTH conditions are met:
-				--   1. Close enough (straight-line distance ≤ AttackDistance)
-				--   2. Unobstructed line of sight (no wall/door frame in the way)
-				--
-				-- If the player is "close" but behind geometry the NPC keeps
-				-- pathfinding around the obstacle instead of freezing at the doorway.
-				-- ─────────────────────────────────────────────────────────────────
-				local los = inRange and hasLineOfSight(npc, currentTarget)
+				local los     = inRange and hasLineOfSight(npc, currentTarget)
 
 				if los then
-					-- Can see AND reach the target — attack!
-					if isPathfinding then
+					-- ── Clear LOS + in range → attack ────────────────────────────
+					if not isAttacking then
 						AI.Stop(npc)
-						isPathfinding = false
+						isAttacking = true
 					end
+					rePathTimer = os.clock()
+					stuck.suppress() -- standing still intentionally, don't flag as stuck
+
 					local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-					if npcRoot then
-						humanoid:MoveTo(npcRoot.Position)
-					end
+					if npcRoot then humanoid:MoveTo(npcRoot.Position) end
+
 					VisionSystem.faceTarget(npc, currentTarget)
 					CombatManager.tryAttack(npc, currentTarget, data)
 
 				else
-					-- Either out of range OR blocked by geometry → keep pathfinding
+					-- ── Out of range OR LOS blocked → pathfind ───────────────────
 					VisionSystem.stopFacing(npc)
-					if not isPathfinding then
-						AI.SmartPathfind(npc, currentTarget)
-						isPathfinding = true
-						if DEBUG then
-							print(string.format(
-								"[%s] Resuming pathfind — inRange=%s los=%s dist=%.2f",
-								npc.Name,
-								tostring(inRange),
-								tostring(los),
-								dist
-								))
+					stuck.update(npc)
+
+					if not isAttacking and stuck.isStuck() then
+						forceRepath()
+					else
+						local now = os.clock()
+						local shouldRepath = isAttacking
+							or (now - rePathTimer >= REPATH_INTERVAL)
+
+						if shouldRepath then
+							isAttacking = false
+							rePathTimer = now
+							AI.SmartPathfind(npc, currentTarget)
+
+							if DEBUG then
+								print(string.format(
+									"[%s] Resuming pathfind — inRange=%s los=%s dist=%.2f",
+									npc.Name, tostring(inRange), tostring(los), dist
+									))
+							end
 						end
 					end
 				end
@@ -215,6 +225,7 @@ local function setupEnemy(npc)
 
 		AI.Stop(npc)
 		CombatManager.cleanup(npc)
+		VisionSystem.stopFacing(npc)
 	end)
 end
 
