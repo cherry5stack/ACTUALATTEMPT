@@ -20,7 +20,7 @@ EnemyData["Fighter"] = {
 	Health = 100,
 	WalkSpeed = 12,
 	DetectionRange = 50,
-	AgentRadius = 2.5,
+	AgentRadius = 2,
 	AgentHeight = 5,
 	AttackDistance = 5,
 
