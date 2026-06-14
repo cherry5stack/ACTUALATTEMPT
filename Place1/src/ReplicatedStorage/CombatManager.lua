@@ -1,6 +1,23 @@
 local CombatManager = {}
 
 local lastAttackTimes = {}
+local DEBUG = true
+
+local function drawHitbox(cframe, size, duration)
+	if not DEBUG then return end
+	local part = Instance.new("Part")
+	part.Anchored    = true
+	part.CanCollide  = false
+	part.CanQuery    = false
+	part.CastShadow  = false
+	part.Transparency = 0.5
+	part.Color       = Color3.fromRGB(255, 0, 0)
+	part.Material    = Enum.Material.Neon
+	part.Size        = size
+	part.CFrame      = cframe
+	part.Parent      = workspace
+	game:GetService("Debris"):AddItem(part, duration or 0.2)
+end
 
 function CombatManager.tryAttack(npc, target, data)
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
@@ -50,6 +67,7 @@ function CombatManager.tryAttack(npc, target, data)
 
 	local direction = (targetRoot.Position - npcRoot.Position).Unit
 	local hitboxCFrame = CFrame.new(npcRoot.Position + direction * chosen.HitboxOffset)
+	drawHitbox(hitboxCFrame, chosen.HitboxSize, 0.2)
 
 	local params = OverlapParams.new()
 	params.FilterDescendantsInstances = {npc}
@@ -73,5 +91,7 @@ end
 function CombatManager.cleanup(npc)
 	lastAttackTimes[npc] = nil
 end
+
+
 
 return CombatManager
