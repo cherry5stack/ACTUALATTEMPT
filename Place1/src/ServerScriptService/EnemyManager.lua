@@ -95,6 +95,15 @@ local function setupEnemy(npc)
 	config.AgentInfo.AgentHeight                = data.AgentHeight
 	config.AgentInfo.Costs                      = data.AgentCosts or { Obstacle = math.huge }
 	config.DirectMoveTo.Enabled                 = false
+	
+	--if cant reach target..
+	config.Hooks.PathingFailed = function(npc, reason)
+		if DEBUG then
+			print(string.format("[%s] Pathing failed — %s", npc.Name, reason))
+		end
+		-- future: set noPathFlag = true to pause stuck recovery spam
+	end
+	
 	AI.InsertAntiLag(npc)
 
 	task.spawn(function()
