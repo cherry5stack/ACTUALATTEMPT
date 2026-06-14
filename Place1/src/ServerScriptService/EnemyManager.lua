@@ -15,74 +15,54 @@ local enemiesFolder = workspace:WaitForChild("Enemies")
 -- DEBUG CONFIG  (flip to false before shipping)
 -- ─────────────────────────────────────────────
 local DEBUG              = true
-local DEBUG_RAY_LIFETIME = 0.15
-local DEBUG_PRINT_LOS    = true
 local DEBUG_PRINT_DIST   = true
+local DEBUG_PRINT_GROUND = true
 
 local REPATH_INTERVAL    = 0.5
 
 -- ─────────────────────────────────────────────
--- Helpers
+-- Debug helpers
 -- ─────────────────────────────────────────────
 
-local function drawDebugRay(origin, direction, color)
-	if not DEBUG then return end
-	local len = direction.Magnitude
-	if len < 0.01 then return end
-	local midpoint = origin + direction * 0.5
-	local part = Instance.new("Part")
-	part.Anchored    = true
-	part.CanCollide  = false
-	part.CanQuery    = false
-	part.CastShadow  = false
-	part.Size        = Vector3.new(0.05, 0.05, len)
-	part.CFrame      = CFrame.lookAt(midpoint, origin + direction)
-	part.Color       = color
-	part.Material    = Enum.Material.Neon
-	part.Parent      = workspace
-	game:GetService("Debris"):AddItem(part, DEBUG_RAY_LIFETIME)
-end
+local function debugGroundCheck(npc, agentCosts)
+	if not DEBUG_PRINT_GROUND then return end
 
-local function hasLineOfSight(npc, target)
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-	if not npcRoot then return false end
-
-	local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
-	if not targetRoot then return false end
-
-	local eyeOffset = Vector3.new(0, 1.5, 0)
-	local origin    = npcRoot.Position + eyeOffset
-	local goal      = targetRoot.Position + eyeOffset
-	local direction = goal - origin
+	if not npcRoot then return end
 
 	local params = RaycastParams.new()
-	params.FilterDescendantsInstances = { npc, target.Character }
+	params.FilterDescendantsInstances = { npc }
 	params.FilterType = Enum.RaycastFilterType.Exclude
 
-	local result = workspace:Raycast(origin, direction, params)
+	local result = workspace:Raycast(
+		npcRoot.Position,
+		Vector3.new(0, -5, 0),
+		params
+	)
 
-	if DEBUG then
-		if result then
-			drawDebugRay(origin, direction, Color3.fromRGB(255, 60, 60))
-			if DEBUG_PRINT_LOS then
+	if not result then return end
+
+	local part     = result.Instance
+	local modifier = part:FindFirstChildOfClass("PathfindingModifier")
+
+	if modifier then
+		local label = modifier.Label
+		local cost  = agentCosts[label]
+		if label and label ~= "" then
+			if cost then
 				print(string.format(
-					"[%s] LOS BLOCKED by '%s' at %.2f studs (target %.2f studs away)",
-					npc.Name, result.Instance:GetFullName(),
-					(result.Position - origin).Magnitude, direction.Magnitude
+					"[%s] STANDING ON labelled part '%s' | Label='%s' | Cost=%s",
+					npc.Name, part.Name, label,
+					cost == math.huge and "math.huge (impassable)" or tostring(cost)
 					))
-			end
-		else
-			drawDebugRay(origin, direction, Color3.fromRGB(60, 255, 60))
-			if DEBUG_PRINT_LOS then
+			else
 				print(string.format(
-					"[%s] LOS CLEAR to %s (%.2f studs)",
-					npc.Name, target.Name, direction.Magnitude
+					"[%s] STANDING ON labelled part '%s' | Label='%s' | Cost=NOT IN AGENT COSTS (treated as 1)",
+					npc.Name, part.Name, label
 					))
 			end
 		end
 	end
-
-	return result == nil
 end
 
 -- ─────────────────────────────────────────────
@@ -109,21 +89,28 @@ local function setupEnemy(npc)
 	humanoid.WalkSpeed = data.WalkSpeed
 
 	local config = AI.GetConfig(npc)
-	config.Tracking.Enabled = true
+	config.Tracking.Enabled                     = true
 	config.Tracking.CollinearTargetPositionOffset = 0
-	config.AgentInfo.AgentRadius = data.AgentRadius
-	config.AgentInfo.AgentHeight = data.AgentHeight
+	config.AgentInfo.AgentRadius                = data.AgentRadius
+	config.AgentInfo.AgentHeight                = data.AgentHeight
+	config.AgentInfo.Costs                      = data.AgentCosts or { Obstacle = math.huge }
+	config.DirectMoveTo.Enabled                 = false
 	AI.InsertAntiLag(npc)
 
 	task.spawn(function()
-		local currentTarget = nil
-		local isAttacking   = false
-		local swapTimer     = 0
-		local rePathTimer   = 0
-		local SWAP_DELAY    = 1
+		local currentTarget  = nil
+		local isAttacking    = false
+		local attackStandPos = nil
+		local swapTimer      = 0
+		local rePathTimer    = 0
+		local SWAP_DELAY     = 1
 
-		-- Each enemy gets its own isolated StuckRecovery instance
 		local stuck = StuckRecovery()
+
+		local function resetAttackState()
+			isAttacking    = false
+			attackStandPos = nil
+		end
 
 		local function forceRepath()
 			AI.Stop(npc)
@@ -146,6 +133,8 @@ local function setupEnemy(npc)
 		while npc.Parent ~= nil and humanoid.Health > 0 do
 			task.wait(0.1)
 
+			debugGroundCheck(npc, config.AgentInfo.Costs)
+
 			local newTarget = TargetingManager.getTarget(npc, data)
 
 			-- Target-swap debounce
@@ -154,7 +143,7 @@ local function setupEnemy(npc)
 					currentTarget = newTarget
 					swapTimer     = os.clock()
 					rePathTimer   = 0
-					isAttacking   = false
+					resetAttackState()
 					stuck.reset(npc)
 
 					if currentTarget then
@@ -177,19 +166,23 @@ local function setupEnemy(npc)
 				end
 
 				local inRange = DistanceManager.isInRange(npc, currentTarget, data)
-				local los     = inRange and hasLineOfSight(npc, currentTarget)
+				local los     = inRange and VisionSystem.hasLineOfSight(npc, currentTarget)
 
 				if los then
 					-- ── Clear LOS + in range → attack ────────────────────────────
 					if not isAttacking then
 						AI.Stop(npc)
 						isAttacking = true
+						local npcRoot = npc:FindFirstChild("HumanoidRootPart")
+						attackStandPos = npcRoot and npcRoot.Position or nil
 					end
-					rePathTimer = os.clock()
-					stuck.suppress() -- standing still intentionally, don't flag as stuck
 
-					local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-					if npcRoot then humanoid:MoveTo(npcRoot.Position) end
+					rePathTimer = os.clock()
+					stuck.suppress()
+
+					if attackStandPos then
+						humanoid:MoveTo(attackStandPos)
+					end
 
 					VisionSystem.faceTarget(npc, currentTarget)
 					CombatManager.tryAttack(npc, currentTarget, data)
@@ -207,7 +200,7 @@ local function setupEnemy(npc)
 							or (now - rePathTimer >= REPATH_INTERVAL)
 
 						if shouldRepath then
-							isAttacking = false
+							resetAttackState()
 							rePathTimer = now
 							AI.SmartPathfind(npc, currentTarget)
 
