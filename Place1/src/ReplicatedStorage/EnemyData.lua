@@ -32,7 +32,7 @@ EnemyData["Fighter"] = {
 		mergeAttack("Punch"),
 		mergeAttack("HeavySlam", {
 			Damage  = 30,
-			Cooldown = 2,
+			Cooldown = 13,
 		}),
 	},
 }
