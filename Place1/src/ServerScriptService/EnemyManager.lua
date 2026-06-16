@@ -8,21 +8,16 @@ local TargetingManager = require(rs.TargetingManager)
 local DistanceManager  = require(rs.DistanceManager)
 local CombatManager    = require(rs.CombatManager)
 local StuckRecovery    = require(rs.StuckRecovery)
+local SoundManager     = require(rs.SoundManager)
 
 local enemiesFolder = workspace:WaitForChild("Enemies")
 
--- ─────────────────────────────────────────────
--- DEBUG CONFIG  (flip to false before shipping)
--- ─────────────────────────────────────────────
-local DEBUG              = true
-local DEBUG_PRINT_DIST   = true
-local DEBUG_PRINT_GROUND = true
+local DEBUG              = false
+local DEBUG_PRINT_DIST   = false
+local DEBUG_PRINT_GROUND = false
 
 local REPATH_INTERVAL    = 0.5
-
--- ─────────────────────────────────────────────
--- Debug helpers
--- ─────────────────────────────────────────────
+local lastFootstep       = {}
 
 local function debugGroundCheck(npc, agentCosts)
 	if not DEBUG_PRINT_GROUND then return end
@@ -34,12 +29,7 @@ local function debugGroundCheck(npc, agentCosts)
 	params.FilterDescendantsInstances = { npc }
 	params.FilterType = Enum.RaycastFilterType.Exclude
 
-	local result = workspace:Raycast(
-		npcRoot.Position,
-		Vector3.new(0, -5, 0),
-		params
-	)
-
+	local result = workspace:Raycast(npcRoot.Position, Vector3.new(0, -5, 0), params)
 	if not result then return end
 
 	local part     = result.Instance
@@ -65,10 +55,6 @@ local function debugGroundCheck(npc, agentCosts)
 	end
 end
 
--- ─────────────────────────────────────────────
--- Main setup
--- ─────────────────────────────────────────────
-
 local function setupEnemy(npc)
 	local humanoid = npc:FindFirstChildOfClass("Humanoid")
 	local enemyTypeValue = npc:FindFirstChild("EnemyType")
@@ -89,22 +75,50 @@ local function setupEnemy(npc)
 	humanoid.WalkSpeed = data.WalkSpeed
 
 	local config = AI.GetConfig(npc)
-	config.Tracking.Enabled                     = true
+	config.Tracking.Enabled                      = true
 	config.Tracking.CollinearTargetPositionOffset = 0
-	config.AgentInfo.AgentRadius                = data.AgentRadius
-	config.AgentInfo.AgentHeight                = data.AgentHeight
-	config.AgentInfo.Costs                      = data.AgentCosts or { Obstacle = math.huge }
-	config.DirectMoveTo.Enabled                 = false
-	
-	--if cant reach target..
+	config.AgentInfo.AgentRadius                 = data.AgentRadius
+	config.AgentInfo.AgentHeight                 = data.AgentHeight
+	config.AgentInfo.Costs                       = data.AgentCosts or { Obstacle = math.huge }
+	config.DirectMoveTo.Enabled                  = false
+
 	config.Hooks.PathingFailed = function(npc, reason)
 		if DEBUG then
 			print(string.format("[%s] Pathing failed — %s", npc.Name, reason))
 		end
-		-- future: set noPathFlag = true to pause stuck recovery spam
 	end
-	
+
 	AI.InsertAntiLag(npc)
+
+	-- spawn sound
+	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
+	if npcRoot then
+		SoundManager.play(data.Sounds and data.Sounds.Spawn, npcRoot.Position)
+	end
+
+	-- death sound
+	humanoid.Died:Connect(function()
+		local root = npc:FindFirstChild("HumanoidRootPart")
+		if root then
+			SoundManager.play(data.Sounds and data.Sounds.Death, root.Position)
+		end
+		lastFootstep[npc] = nil
+	end)
+	
+	
+	local footstepInterval = 0.7 / (humanoid.WalkSpeed / 16)
+	-- footstep sound
+	humanoid.Running:Connect(function(speed)
+		if speed <= 0 then return end
+		local root = npc:FindFirstChild("HumanoidRootPart")
+		if not root then return end
+		local footstepInterval = 0.7 / (humanoid.WalkSpeed / 16)
+		local now = os.clock()
+		if now - (lastFootstep[npc] or 0) >= footstepInterval then
+			lastFootstep[npc] = now
+			SoundManager.play(data.Sounds and data.Sounds.Footstep, root.Position)
+		end
+	end)
 
 	task.spawn(function()
 		local currentTarget  = nil
@@ -146,7 +160,6 @@ local function setupEnemy(npc)
 
 			local newTarget = TargetingManager.getTarget(npc, data)
 
-			-- Target-swap debounce
 			if newTarget ~= currentTarget then
 				if newTarget == nil or os.clock() - swapTimer >= SWAP_DELAY then
 					currentTarget = newTarget
@@ -178,12 +191,11 @@ local function setupEnemy(npc)
 				local los     = inRange and VisionSystem.hasLineOfSight(npc, currentTarget)
 
 				if los then
-					-- ── Clear LOS + in range → attack ────────────────────────────
 					if not isAttacking then
 						AI.Stop(npc)
 						isAttacking = true
-						local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-						attackStandPos = npcRoot and npcRoot.Position or nil
+						local root = npc:FindFirstChild("HumanoidRootPart")
+						attackStandPos = root and root.Position or nil
 					end
 
 					rePathTimer = os.clock()
@@ -195,9 +207,7 @@ local function setupEnemy(npc)
 
 					VisionSystem.faceTarget(npc, currentTarget)
 					CombatManager.tryAttack(npc, currentTarget, data)
-
 				else
-					-- ── Out of range OR LOS blocked → pathfind ───────────────────
 					VisionSystem.stopFacing(npc)
 					stuck.update(npc)
 
