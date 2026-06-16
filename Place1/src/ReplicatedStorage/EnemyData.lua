@@ -35,6 +35,11 @@ EnemyData["Fighter"] = {
 			Cooldown = 13,
 		}),
 	},
+	Sounds = {
+		Spawn     = "FighterSpawn",
+		Death     = "FighterDeath",
+		Footstep  = "FighterFootstep",
+	},
 }
 
 return EnemyData
