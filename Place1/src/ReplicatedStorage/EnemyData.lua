@@ -31,8 +31,8 @@ EnemyData["Fighter"] = {
 	Attacks = {
 		mergeAttack("Punch"),
 		mergeAttack("HeavySlam", {
-			Damage  = 30,
-			Cooldown = 13,
+			Damage  = 51,
+			Cooldown = 4,
 		}),
 	},
 	Sounds = {
