@@ -2,6 +2,7 @@ local CombatManager = {}
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundManager = require(ReplicatedStorage:WaitForChild("SoundManager"))
 local lastAttackTimes = {}
 local activeAnimations = {}
 local lastAttackEnd = {}
@@ -85,13 +86,16 @@ local function spawnHitbox(npcRoot, npc, chosen, onFinished)
 				if hum and character ~= npc and player and canHit then
 					hitTimestamps[character] = now
 					hum:TakeDamage(chosen.Damage)
-					print(string.format("[%s] Used %s on %s for %d damage", npc.Name, chosen.Name, character.Name, chosen.Damage))
+					local hitRoot = character:FindFirstChild("HumanoidRootPart")
+					if hitRoot then
+						SoundManager.play(chosen.Sounds and chosen.Sounds.Hit, hitRoot.Position)
+					end
 				end
 			end
 
 			if elapsed >= duration then
 				connection:Disconnect()
-				if onFinished then onFinished() end  -- notify when hitbox is fully done
+				if onFinished then onFinished() end
 			end
 		end)
 	else
@@ -105,10 +109,13 @@ local function spawnHitbox(npcRoot, npc, chosen, onFinished)
 			if hum and character ~= npc and player and not alreadyHit[character] then
 				alreadyHit[character] = true
 				hum:TakeDamage(chosen.Damage)
-				print(string.format("[%s] Used %s on %s for %d damage", npc.Name, chosen.Name, character.Name, chosen.Damage))
+				local hitRoot = character:FindFirstChild("HumanoidRootPart")
+				if hitRoot then
+					SoundManager.play(chosen.Sounds and chosen.Sounds.Hit, hitRoot.Position)
+				end
 			end
 		end
-		if onFinished then onFinished() end  -- instant attacks finish immediately
+		if onFinished then onFinished() end
 	end
 end
 
@@ -134,10 +141,7 @@ function CombatManager.tryAttack(npc, target, data)
 		end
 	end
 
-	if #validAttacks == 0 then
-		print(string.format("[%s] All attacks on cooldown", npc.Name))
-		return
-	end
+	if #validAttacks == 0 then return end
 
 	table.sort(validAttacks, function(a, b)
 		return (a.Priority or 1) > (b.Priority or 1)
@@ -160,7 +164,6 @@ function CombatManager.tryAttack(npc, target, data)
 		and npc:FindFirstChildOfClass("Humanoid"):FindFirstChildOfClass("Animator")
 
 	if not animator then
-		print(string.format("[%s] No Animator found, falling back", npc.Name))
 		spawnHitbox(npcRoot, npc, chosen)
 		return
 	end
@@ -169,12 +172,10 @@ function CombatManager.tryAttack(npc, target, data)
 	local animObject = animFolder and animFolder:FindFirstChild(chosen.AnimationName)
 
 	if not animObject then
-		print(string.format("[%s] Animation '%s' not found, falling back", npc.Name, tostring(chosen.AnimationName)))
 		spawnHitbox(npcRoot, npc, chosen)
 		return
 	end
 
-	print(string.format("[%s] Playing animation '%s'", npc.Name, chosen.AnimationName))
 	local track = animator:LoadAnimation(animObject)
 	activeAnimations[npc] = true
 
@@ -185,21 +186,20 @@ function CombatManager.tryAttack(npc, target, data)
 		if animDone and hitboxDone then
 			activeAnimations[npc] = false
 			lastAttackEnd[npc] = os.clock()
-			lastAttackTimes[npc][chosen.Name] = os.clock()  -- cooldown starts NOW
-			print(string.format("[%s] Attack '%s' fully finished", npc.Name, chosen.Name))
+			lastAttackTimes[npc][chosen.Name] = os.clock()
 		end
 	end
 
 	track.Stopped:Connect(function()
-		print(string.format("[%s] Animation '%s' stopped", npc.Name, chosen.AnimationName))
 		animDone = true
 		tryRelease()
 	end)
 
+	-- play swing sound when animation starts
+	SoundManager.play(chosen.Sounds and chosen.Sounds.Swing, npcRoot.Position)
 	track:Play(nil, nil, chosen.AttackSpeed or 1)
 
 	track:GetMarkerReachedSignal("Hit"):Connect(function()
-		print(string.format("[%s] Hit marker reached for '%s'", npc.Name, chosen.AnimationName))
 		spawnHitbox(npcRoot, npc, chosen, function()
 			hitboxDone = true
 			tryRelease()
