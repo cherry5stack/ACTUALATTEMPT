@@ -11,6 +11,10 @@ AttacksData["Punch"] = {
 	HitboxOffset = 1,
 	Range = 5,
 	AttackSpeed = 1,
+	Sounds = {
+		Swing = "PunchSwing",   -- plays when animation starts
+		Hit   = "PunchHit",     -- plays when hitbox connects
+	},
 }
 
 AttacksData["HeavySlam"] = {
@@ -24,8 +28,12 @@ AttacksData["HeavySlam"] = {
 	Priority = 2,
 	HitboxDuration = 3,
 	StaticHitbox = true,
-	ParticleEffect = "SlamEffect",  -- name of ParticleEmitter in RS.ParticleEffects
+	--ParticleEffect = "SlamEffect",  -- name of ParticleEmitter in RS.ParticleEffects
 	AttackSpeed = 0.5,
+	Sounds = {
+		Swing = "PunchSwing",   -- plays when animation starts
+		Hit   = "PunchHit",     -- plays when hitbox connects
+	},
 }
 
 return AttacksData
