@@ -2,7 +2,10 @@ local CombatManager = {}
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris = game:GetService("Debris")
 local SoundManager = require(ReplicatedStorage:WaitForChild("SoundManager"))
+local DamageEvent = ReplicatedStorage:WaitForChild("DamageEvent")
+local ParticleEvent = ReplicatedStorage:WaitForChild("ParticleEvent")
 local lastAttackTimes = {}
 local activeAnimations = {}
 local lastAttackEnd = {}
@@ -21,16 +24,25 @@ local function drawHitbox(cframe, size, duration)
 	part.Size         = size
 	part.CFrame       = cframe
 	part.Parent       = workspace
-	game:GetService("Debris"):AddItem(part, duration or 0.2)
+	Debris:AddItem(part, duration or 0.2)
 end
 
-local function attachParticle(hitboxPart, effectName)
-	if not effectName or effectName == "" then return end
-	local effectsFolder = ReplicatedStorage:FindFirstChild("ParticleEffects")
-	if not effectsFolder then return end
-	local particle = effectsFolder:FindFirstChild(effectName)
-	if not particle or not particle:IsA("ParticleEmitter") then return end
-	particle:Clone().Parent = hitboxPart
+local function dealDamage(character, amount, worldPos, effectName, emitCount)
+	local hum = character:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+
+	local player = Players:GetPlayerFromCharacter(character)
+	hum:TakeDamage(amount)
+
+	local isCrit = amount >= 50
+
+	if player then
+		DamageEvent:FireClient(player, worldPos, amount, isCrit)
+	end
+
+	if effectName and effectName ~= "" then
+		ParticleEvent:FireAllClients(worldPos, effectName, emitCount or 20)
+	end
 end
 
 local function spawnHitbox(npcRoot, npc, chosen, onFinished)
@@ -59,8 +71,7 @@ local function spawnHitbox(npcRoot, npc, chosen, onFinished)
 			hitboxPart.Size         = chosen.HitboxSize
 			hitboxPart.CFrame       = frozenCFrame
 			hitboxPart.Parent       = workspace
-			attachParticle(hitboxPart, chosen.ParticleEffect)
-			game:GetService("Debris"):AddItem(hitboxPart, duration)
+			Debris:AddItem(hitboxPart, duration)
 		end
 
 		local connection
@@ -85,8 +96,9 @@ local function spawnHitbox(npcRoot, npc, chosen, onFinished)
 				local canHit = not lastHit or (tickRate and now - lastHit >= tickRate)
 				if hum and character ~= npc and player and canHit then
 					hitTimestamps[character] = now
-					hum:TakeDamage(chosen.Damage)
 					local hitRoot = character:FindFirstChild("HumanoidRootPart")
+					local hitPos = hitRoot and hitRoot.Position or npcRoot.Position
+					dealDamage(character, chosen.Damage, hitPos, chosen.ParticleEffect, chosen.EmitCount)
 					if hitRoot then
 						SoundManager.play(chosen.Sounds and chosen.Sounds.Hit, hitRoot.Position)
 					end
@@ -108,8 +120,9 @@ local function spawnHitbox(npcRoot, npc, chosen, onFinished)
 			local hum = character:FindFirstChildOfClass("Humanoid")
 			if hum and character ~= npc and player and not alreadyHit[character] then
 				alreadyHit[character] = true
-				hum:TakeDamage(chosen.Damage)
 				local hitRoot = character:FindFirstChild("HumanoidRootPart")
+				local hitPos = hitRoot and hitRoot.Position or npcRoot.Position
+				dealDamage(character, chosen.Damage, hitPos, chosen.ParticleEffect, chosen.EmitCount)
 				if hitRoot then
 					SoundManager.play(chosen.Sounds and chosen.Sounds.Hit, hitRoot.Position)
 				end
@@ -195,7 +208,6 @@ function CombatManager.tryAttack(npc, target, data)
 		tryRelease()
 	end)
 
-	-- play swing sound when animation starts
 	SoundManager.play(chosen.Sounds and chosen.Sounds.Swing, npcRoot.Position)
 	track:Play(nil, nil, chosen.AttackSpeed or 1)
 
