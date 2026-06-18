@@ -6,9 +6,11 @@ local Debris = game:GetService("Debris")
 local SoundManager = require(ReplicatedStorage:WaitForChild("SoundManager"))
 local DamageEvent = ReplicatedStorage:WaitForChild("DamageEvent")
 local ParticleEvent = ReplicatedStorage:WaitForChild("ParticleEvent")
+local TelegraphManager = require(ReplicatedStorage:WaitForChild("TelegraphManager"))
 local lastAttackTimes = {}
 local activeAnimations = {}
 local lastAttackEnd = {}
+local spawnTimes = {} -- NEW: tracks os.clock() when each NPC was first seen by tryAttack
 local DEBUG = false
 
 local function drawHitbox(cframe, size, duration)
@@ -27,9 +29,14 @@ local function drawHitbox(cframe, size, duration)
 	Debris:AddItem(part, duration or 0.2)
 end
 
+local function isNpcAlive(npc)
+	local hum = npc:FindFirstChildOfClass("Humanoid")
+	return hum ~= nil and hum.Health > 0
+end
+
 local function dealDamage(character, amount, worldPos, effectName, emitCount)
 	local hum = character:FindFirstChildOfClass("Humanoid")
-	if not hum then return end
+	if not hum or hum.Health <= 0 then return end
 
 	local player = Players:GetPlayerFromCharacter(character)
 	hum:TakeDamage(amount)
@@ -76,6 +83,13 @@ local function spawnHitbox(npcRoot, npc, chosen, onFinished)
 
 		local connection
 		connection = RunService.Heartbeat:Connect(function(dt)
+			-- Kill hitbox if NPC died mid-swing
+			if not isNpcAlive(npc) then
+				connection:Disconnect()
+				if onFinished then onFinished() end
+				return
+			end
+
 			elapsed += dt
 			local now = os.clock()
 
@@ -143,11 +157,16 @@ function CombatManager.tryAttack(npc, target, data)
 
 	if not lastAttackTimes[npc] then lastAttackTimes[npc] = {} end
 
+	local timeAlive = os.clock() - (spawnTimes[npc] or os.clock()) -- NEW
+
 	local dist = (npcRoot.Position - targetRoot.Position).Magnitude
 
 	local validAttacks = {}
 	for _, attack in ipairs(data.Attacks) do
 		if not attack then continue end
+
+		if attack.UnlockAfter and timeAlive < attack.UnlockAfter then continue end -- NEW
+
 		local lastTime = lastAttackTimes[npc][attack.Name] or 0
 		if dist <= attack.Range and os.clock() - lastTime >= attack.Cooldown then
 			table.insert(validAttacks, attack)
@@ -194,6 +213,7 @@ function CombatManager.tryAttack(npc, target, data)
 
 	local animDone = false
 	local hitboxDone = false
+	local hitboxSpawned = false -- prevents double-spawn if marker fires after telegraph already gated it
 
 	local function tryRelease()
 		if animDone and hitboxDone then
@@ -209,20 +229,55 @@ function CombatManager.tryAttack(npc, target, data)
 	end)
 
 	SoundManager.play(chosen.Sounds and chosen.Sounds.Swing, npcRoot.Position)
-	track:Play(nil, nil, chosen.AttackSpeed or 1)
 
-	track:GetMarkerReachedSignal("Hit"):Connect(function()
+	local telegraph = chosen.Telegraph
+	local gatesHitbox = telegraph and telegraph.Enabled and telegraph.GatesHitbox
+
+	local function doSpawnHitbox()
+		if hitboxSpawned then return end
+		hitboxSpawned = true
+
+		if not isNpcAlive(npc) then
+			hitboxDone = true
+			tryRelease()
+			return
+		end
+
 		spawnHitbox(npcRoot, npc, chosen, function()
 			hitboxDone = true
 			tryRelease()
 		end)
+	end
+
+	-- Start telegraph at swing start (visual cue), regardless of gating mode
+	if telegraph and telegraph.Enabled then
+		TelegraphManager.play(npc, telegraph, function()
+			-- Only this branch actually spawns the hitbox when gating is enabled
+			if gatesHitbox then
+				doSpawnHitbox()
+			end
+		end)
+	end
+
+	track:Play(nil, nil, chosen.AttackSpeed or 1)
+
+	track:GetMarkerReachedSignal("Hit"):Connect(function()
+		-- If gated, the telegraph's onReady is responsible for spawning — skip here
+		if gatesHitbox then return end
+		doSpawnHitbox()
 	end)
 end
 
 function CombatManager.cleanup(npc)
+	TelegraphManager.cancel(npc)
 	lastAttackTimes[npc] = nil
 	activeAnimations[npc] = nil
 	lastAttackEnd[npc] = nil
+	spawnTimes[npc] = nil -- NEW
+end
+
+function CombatManager.registerSpawnTime(npc)
+	spawnTimes[npc] = os.clock()
 end
 
 return CombatManager
