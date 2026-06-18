@@ -70,9 +70,12 @@ local function setupEnemy(npc)
 		return
 	end
 
+	CombatManager.registerSpawnTime(npc) -- NEW: starts the unlock timer right here, at setup
+
 	humanoid.MaxHealth = data.Health
 	humanoid.Health    = data.Health
 	humanoid.WalkSpeed = data.WalkSpeed
+
 
 	local config = AI.GetConfig(npc)
 	config.Tracking.Enabled                      = true
@@ -90,26 +93,26 @@ local function setupEnemy(npc)
 
 	AI.InsertAntiLag(npc)
 
-	-- spawn sound
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if npcRoot then
 		SoundManager.play(data.Sounds and data.Sounds.Spawn, npcRoot.Position)
 	end
 
-	-- death sound
 	humanoid.Died:Connect(function()
 		local root = npc:FindFirstChild("HumanoidRootPart")
 		if root then
 			SoundManager.play(data.Sounds and data.Sounds.Death, root.Position)
 		end
 		lastFootstep[npc] = nil
+		-- Clean up AI and combat state immediately on death
+		AI.Stop(npc)
+		CombatManager.cleanup(npc)
+		VisionSystem.stopFacing(npc)
 	end)
-	
-	
-	local footstepInterval = 0.7 / (humanoid.WalkSpeed / 16)
-	-- footstep sound
+
 	humanoid.Running:Connect(function(speed)
 		if speed <= 0 then return end
+		if humanoid.Health <= 0 then return end
 		local root = npc:FindFirstChild("HumanoidRootPart")
 		if not root then return end
 		local footstepInterval = 0.7 / (humanoid.WalkSpeed / 16)
@@ -138,7 +141,7 @@ local function setupEnemy(npc)
 		local function forceRepath()
 			AI.Stop(npc)
 			task.wait()
-			if currentTarget then
+			if currentTarget and humanoid.Health > 0 then
 				AI.SmartPathfind(npc, currentTarget)
 				rePathTimer = os.clock()
 				if DEBUG then
@@ -155,6 +158,9 @@ local function setupEnemy(npc)
 
 		while npc.Parent ~= nil and humanoid.Health > 0 do
 			task.wait(0.1)
+
+			-- Race condition guard: recheck health after the yield
+			if humanoid.Health <= 0 then break end
 
 			debugGroundCheck(npc, config.AgentInfo.Costs)
 
@@ -235,9 +241,13 @@ local function setupEnemy(npc)
 			end
 		end
 
-		AI.Stop(npc)
-		CombatManager.cleanup(npc)
-		VisionSystem.stopFacing(npc)
+		-- Loop exited cleanly (health hit 0 or npc removed)
+		-- Died handler covers the humanoid.Died case,
+		-- but if npc.Parent became nil we still need cleanup here
+		if npc.Parent == nil then
+			CombatManager.cleanup(npc)
+			VisionSystem.stopFacing(npc)
+		end
 	end)
 end
 
