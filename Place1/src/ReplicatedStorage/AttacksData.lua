@@ -92,6 +92,15 @@
 	                          on spawn. Checked against spawn time, NOT
 	                          time since last use.
 ]]
+--[[
+	CastAppearance (table?)   Optional color tint applied to the NPC's whole
+	                          body while this attack's animation plays.
+	CastAppearance.Enabled        (bool)    Turns the tint on/off for this attack.
+	CastAppearance.Color          (Color3)  Color tint applied at swing start.
+	CastAppearance.FadeInTime     (number)  Seconds to tween into the tint color.
+	CastAppearance.FadeOutTime    (number)  Seconds to tween back to original
+	                                        color once the animation finishes.
+]]
 
 
 local AttacksData = {}
@@ -133,18 +142,21 @@ AttacksData["HeavySlam"] = {
 		Hit   = "PunchHit",
 	},
 	Telegraph = {
-		Enabled      = true,
-		Duration     = 1.2,
-		Color        = Color3.fromRGB(255, 50, 50),
-		FadeIn       = 0.15,
-		FadeOut      = 0.2,
+		Enabled  = true,
+		Duration = 1.2,
+		Color    = Color3.fromRGB(255, 50, 50),
+		FadeIn   = 0.15,
+		FadeOut  = 0.2,
 		GatesHitbox  = false,
-		
 		-- if true, hitbox waits for telegraph to finish will cast after telegraph is done, ignores Hit marker timing completely
 		--if false, hitbox and telegraph and 2 different timers, telehraph is just visual, hitbox triggers are normal
 	},
-	
-	
+	CastAppearance = {
+		Enabled     = true,
+		Color       = Color3.fromRGB(120, 0, 150), -- purple while winding up
+		FadeInTime  = 0.2,
+		FadeOutTime = 0.3,
+	},
 }
 
 AttacksData["EnragedSlam"] = {
