@@ -9,6 +9,7 @@ local DistanceManager  = require(rs.DistanceManager)
 local CombatManager    = require(rs.CombatManager)
 local StuckRecovery    = require(rs.StuckRecovery)
 local SoundManager     = require(rs.SoundManager)
+local SmartWanderCtor  = require(rs.SmartWander)
 
 local enemiesFolder = workspace:WaitForChild("Enemies")
 
@@ -70,26 +71,34 @@ local function setupEnemy(npc)
 		return
 	end
 
-	CombatManager.registerSpawnTime(npc) -- NEW: starts the unlock timer right here, at setup
+	CombatManager.registerSpawnTime(npc)
 
 	humanoid.MaxHealth = data.Health
 	humanoid.Health    = data.Health
 	humanoid.WalkSpeed = data.WalkSpeed
 
-
 	local config = AI.GetConfig(npc)
+
+	local function defaultPathingFailed(npc, reason)
+		if DEBUG then
+			print(string.format("[%s] Pathing failed — %s", npc.Name, reason))
+		end
+	end
+
+	local function applyCombatConfig()
+		config.Tracking.Enabled = true
+		config.Hooks.PathingFailed = defaultPathingFailed
+		config.Hooks.GoalReached = nil
+		config.Hooks.PathfindingLinkReached = nil
+	end
+
 	config.Tracking.Enabled                      = true
 	config.Tracking.CollinearTargetPositionOffset = 0
 	config.AgentInfo.AgentRadius                 = data.AgentRadius
 	config.AgentInfo.AgentHeight                 = data.AgentHeight
 	config.AgentInfo.Costs                       = data.AgentCosts or { Obstacle = math.huge }
 	config.DirectMoveTo.Enabled                  = false
-
-	config.Hooks.PathingFailed = function(npc, reason)
-		if DEBUG then
-			print(string.format("[%s] Pathing failed — %s", npc.Name, reason))
-		end
-	end
+	config.Hooks.PathingFailed                   = defaultPathingFailed
 
 	AI.InsertAntiLag(npc)
 
@@ -98,13 +107,31 @@ local function setupEnemy(npc)
 		SoundManager.play(data.Sounds and data.Sounds.Spawn, npcRoot.Position)
 	end
 
+	-- Wander setup (one instance per NPC, only if enabled in EnemyData)
+	-- NOTE: AgentRadius / AgentHeight / AgentCosts are intentionally NOT
+	-- passed here. wanderToPosition no longer touches those — they stay
+	-- exactly as configured above for the lifetime of the NPC.
+	local wander = nil
+	local lastCombatEndTime = 0 -- tracks when currentTarget last became nil, for PostCombatDelay
+
+	if data.Wander and data.Wander.Enabled then
+		wander = SmartWanderCtor()
+		wander.updateSettings({
+			BreaksDoors       = data.Wander.BreaksDoors or false,
+			MinWanderWait     = data.Wander.MinWanderWait or 4,
+			MaxWanderWait     = data.Wander.MaxWanderWait or 10,
+			MinWanderDistance = data.Wander.MinWanderDistance or 10,
+			MaxWanderDistance = data.Wander.MaxWanderDistance or 25,
+		})
+	end
+
 	humanoid.Died:Connect(function()
 		local root = npc:FindFirstChild("HumanoidRootPart")
 		if root then
 			SoundManager.play(data.Sounds and data.Sounds.Death, root.Position)
 		end
 		lastFootstep[npc] = nil
-		-- Clean up AI and combat state immediately on death
+		if wander then wander.stopWandering(npc, AI) end
 		AI.Stop(npc)
 		CombatManager.cleanup(npc)
 		VisionSystem.stopFacing(npc)
@@ -130,6 +157,7 @@ local function setupEnemy(npc)
 		local swapTimer      = 0
 		local rePathTimer    = 0
 		local SWAP_DELAY     = 1
+		local pursuitActiveUntil = 0
 
 		local stuck = StuckRecovery()
 
@@ -144,9 +172,6 @@ local function setupEnemy(npc)
 			if currentTarget and humanoid.Health > 0 then
 				AI.SmartPathfind(npc, currentTarget)
 				rePathTimer = os.clock()
-				if DEBUG then
-					print(string.format("[%s] STUCK RECOVERY — forced Stop + SmartPathfind", npc.Name))
-				end
 			end
 			stuck.reset(npc)
 		end
@@ -159,15 +184,19 @@ local function setupEnemy(npc)
 		while npc.Parent ~= nil and humanoid.Health > 0 do
 			task.wait(0.1)
 
-			-- Race condition guard: recheck health after the yield
 			if humanoid.Health <= 0 then break end
 
 			debugGroundCheck(npc, config.AgentInfo.Costs)
 
-			local newTarget = TargetingManager.getTarget(npc, data)
+			local inPursuitWindow = os.clock() < pursuitActiveUntil
+			local searchRange = inPursuitWindow and (data.PursueRange or data.DetectionRange) or data.DetectionRange
+
+			local newTarget = TargetingManager.getTarget(npc, data, searchRange)
 
 			if newTarget ~= currentTarget then
 				if newTarget == nil or os.clock() - swapTimer >= SWAP_DELAY then
+					local hadTarget = currentTarget ~= nil
+
 					currentTarget = newTarget
 					swapTimer     = os.clock()
 					rePathTimer   = 0
@@ -175,15 +204,27 @@ local function setupEnemy(npc)
 					stuck.reset(npc)
 
 					if currentTarget then
+						if wander and wander.isWandering() then
+							wander.stopWandering(npc, AI)
+						end
+						applyCombatConfig()
 						AI.SmartPathfind(npc, currentTarget)
+
+						pursuitActiveUntil = os.clock() + (data.PursueLingerTime or 0)
 					else
 						AI.Stop(npc)
 						VisionSystem.stopFacing(npc)
+
+						if hadTarget then
+							lastCombatEndTime = os.clock()
+						end
 					end
 				end
 			end
 
 			if currentTarget then
+				pursuitActiveUntil = os.clock() + (data.PursueLingerTime or 0)
+
 				local dist = DistanceManager.getDistance(npc, currentTarget)
 
 				if DEBUG_PRINT_DIST then
@@ -195,6 +236,18 @@ local function setupEnemy(npc)
 
 				local inRange = DistanceManager.isInRange(npc, currentTarget, data)
 				local los     = inRange and VisionSystem.hasLineOfSight(npc, currentTarget)
+
+				-- NEW: face the target whenever within FaceTargetRange AND has LOS,
+				-- independent of whether it's close enough to actually attack yet.
+				local faceRange = data.FaceTargetRange or data.AttackDistance
+				local withinFaceRange = dist <= faceRange
+				local faceLos = withinFaceRange and VisionSystem.hasLineOfSight(npc, currentTarget)
+
+				if faceLos then
+					VisionSystem.faceTarget(npc, currentTarget)
+				else
+					VisionSystem.stopFacing(npc)
+				end
 
 				if los then
 					if not isAttacking then
@@ -211,10 +264,8 @@ local function setupEnemy(npc)
 						humanoid:MoveTo(attackStandPos)
 					end
 
-					VisionSystem.faceTarget(npc, currentTarget)
 					CombatManager.tryAttack(npc, currentTarget, data)
 				else
-					VisionSystem.stopFacing(npc)
 					stuck.update(npc)
 
 					if not isAttacking and stuck.isStuck() then
@@ -228,23 +279,21 @@ local function setupEnemy(npc)
 							resetAttackState()
 							rePathTimer = now
 							AI.SmartPathfind(npc, currentTarget)
-
-							if DEBUG then
-								print(string.format(
-									"[%s] Resuming pathfind — inRange=%s los=%s dist=%.2f",
-									npc.Name, tostring(inRange), tostring(los), dist
-									))
-							end
 						end
 					end
+				end
+			else
+				local postCombatDelay = (data.Wander and data.Wander.PostCombatDelay) or 0
+				local delayElapsed    = os.clock() - lastCombatEndTime >= postCombatDelay
+
+				if wander and not wander.isWandering() and delayElapsed and wander.shouldCheckForWander() then
+					wander.startWandering(npc, AI)
 				end
 			end
 		end
 
-		-- Loop exited cleanly (health hit 0 or npc removed)
-		-- Died handler covers the humanoid.Died case,
-		-- but if npc.Parent became nil we still need cleanup here
 		if npc.Parent == nil then
+			if wander then wander.stopWandering(npc, AI) end
 			CombatManager.cleanup(npc)
 			VisionSystem.stopFacing(npc)
 		end
