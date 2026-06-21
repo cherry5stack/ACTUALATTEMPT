@@ -16,6 +16,7 @@ local enemiesFolder = workspace:WaitForChild("Enemies")
 local DEBUG              = false
 local DEBUG_PRINT_DIST   = false
 local DEBUG_PRINT_GROUND = false
+local DEBUG_PRINT_FACE   = true -- NEW: prints face-lock decision every tick while a target exists
 
 local REPATH_INTERVAL    = 0.5
 local lastFootstep       = {}
@@ -107,12 +108,8 @@ local function setupEnemy(npc)
 		SoundManager.play(data.Sounds and data.Sounds.Spawn, npcRoot.Position)
 	end
 
-	-- Wander setup (one instance per NPC, only if enabled in EnemyData)
-	-- NOTE: AgentRadius / AgentHeight / AgentCosts are intentionally NOT
-	-- passed here. wanderToPosition no longer touches those — they stay
-	-- exactly as configured above for the lifetime of the NPC.
 	local wander = nil
-	local lastCombatEndTime = 0 -- tracks when currentTarget last became nil, for PostCombatDelay
+	local lastCombatEndTime = 0
 
 	if data.Wander and data.Wander.Enabled then
 		wander = SmartWanderCtor()
@@ -126,6 +123,7 @@ local function setupEnemy(npc)
 	end
 
 	humanoid.Died:Connect(function()
+		humanoid.AutoRotate = true
 		local root = npc:FindFirstChild("HumanoidRootPart")
 		if root then
 			SoundManager.play(data.Sounds and data.Sounds.Death, root.Position)
@@ -207,6 +205,7 @@ local function setupEnemy(npc)
 						if wander and wander.isWandering() then
 							wander.stopWandering(npc, AI)
 						end
+						if wander then wander.cleanupBodyGyro(npc) end -- defensive, in case stopWandering's cleanup raced
 						applyCombatConfig()
 						AI.SmartPathfind(npc, currentTarget)
 
@@ -214,6 +213,7 @@ local function setupEnemy(npc)
 					else
 						AI.Stop(npc)
 						VisionSystem.stopFacing(npc)
+						humanoid.AutoRotate = true
 
 						if hadTarget then
 							lastCombatEndTime = os.clock()
@@ -235,17 +235,25 @@ local function setupEnemy(npc)
 				end
 
 				local inRange = DistanceManager.isInRange(npc, currentTarget, data)
-				local los     = inRange and VisionSystem.hasLineOfSight(npc, currentTarget)
+				local hasLOS  = VisionSystem.hasLineOfSight(npc, currentTarget)
+				local los     = inRange and hasLOS
 
-				-- NEW: face the target whenever within FaceTargetRange AND has LOS,
-				-- independent of whether it's close enough to actually attack yet.
 				local faceRange = data.FaceTargetRange or data.AttackDistance
 				local withinFaceRange = dist <= faceRange
-				local faceLos = withinFaceRange and VisionSystem.hasLineOfSight(npc, currentTarget)
+				local faceLos = withinFaceRange and hasLOS
+
+				if DEBUG_PRINT_FACE then
+					print(string.format(
+						"[%s] dist=%.1f faceRange=%.1f within=%s hasLOS=%s faceLos=%s autoRotate=%s",
+						npc.Name, dist, faceRange, tostring(withinFaceRange), tostring(hasLOS), tostring(faceLos), tostring(humanoid.AutoRotate)
+						))
+				end
 
 				if faceLos then
+					humanoid.AutoRotate = false
 					VisionSystem.faceTarget(npc, currentTarget)
 				else
+					humanoid.AutoRotate = true
 					VisionSystem.stopFacing(npc)
 				end
 
