@@ -70,7 +70,7 @@ EnemyData["Fighter"] = {
 	AgentRadius    = 2,
 	AgentHeight    = 5,
 	AttackDistance = 5,
-	FaceTargetRange  = 20,
+	FaceTargetRange  = 40,
 
 	Wander = {
 		Enabled           = true,
