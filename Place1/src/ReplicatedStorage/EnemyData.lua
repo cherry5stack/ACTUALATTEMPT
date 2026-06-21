@@ -44,7 +44,6 @@
 	Sounds.Footstep  (string)  Played periodically while humanoid.Running
 	                           fires with speed > 0.
 ]]
-
 local AttacksData = require(game.ReplicatedStorage.AttacksData)
 
 local function mergeAttack(baseName, overrides)
@@ -65,27 +64,40 @@ local EnemyData = {}
 EnemyData["Fighter"] = {
 	Health         = 100,
 	WalkSpeed      = 12,
-	DetectionRange = 50,
+	DetectionRange = 50,  -- range to FIRST notice a target
+	PursueRange    = 80,  -- range to STAY engaged once pursuing (NEW)
+	PursueLingerTime = 6, -- seconds after losing all targets before reverting to DetectionRange (NEW)
 	AgentRadius    = 2,
 	AgentHeight    = 5,
 	AttackDistance = 5,
+	FaceTargetRange  = 20,
+
+	Wander = {
+		Enabled           = true,
+		BreaksDoors       = false,
+		MinWanderWait     = 1,
+		MaxWanderWait     = 2,
+		MinWanderDistance = 10,
+		MaxWanderDistance = 25,
+		PostCombatDelay   = 5,
+	},
 
 	AgentCosts = {
-		Obstacle   = math.huge,
+		Obstacle    = math.huge,
 		CrackedLava = math.huge,
 	},
 
 	Attacks = {
 		mergeAttack("Punch"),
-		mergeAttack("EnragedSlam", {
-			Damage  = 300,
+		mergeAttack("HeavySlam", {
+			Damage   = 51,
 			Cooldown = 4,
 		}),
 	},
 	Sounds = {
-		Spawn     = "FighterSpawn",
-		Death     = "FighterDeath",
-		Footstep  = "FighterFootstep",
+		Spawn    = "FighterSpawn",
+		Death    = "FighterDeath",
+		Footstep = "FighterFootstep",
 	},
 }
 
