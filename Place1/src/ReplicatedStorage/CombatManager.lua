@@ -4,13 +4,15 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
 local SoundManager = require(ReplicatedStorage:WaitForChild("SoundManager"))
+local TelegraphManager = require(ReplicatedStorage:WaitForChild("TelegraphManager"))
+local AppearanceManager = require(ReplicatedStorage:WaitForChild("AppearanceManager"))
 local DamageEvent = ReplicatedStorage:WaitForChild("DamageEvent")
 local ParticleEvent = ReplicatedStorage:WaitForChild("ParticleEvent")
-local TelegraphManager = require(ReplicatedStorage:WaitForChild("TelegraphManager"))
+
 local lastAttackTimes = {}
 local activeAnimations = {}
 local lastAttackEnd = {}
-local spawnTimes = {} -- NEW: tracks os.clock() when each NPC was first seen by tryAttack
+local spawnTimes = {}
 local DEBUG = false
 
 local function drawHitbox(cframe, size, duration)
@@ -146,18 +148,29 @@ local function spawnHitbox(npcRoot, npc, chosen, onFinished)
 	end
 end
 
+-- Records the moment an NPC is set up, used as the baseline for
+-- attack.UnlockAfter checks. Call this once from EnemyManager.setupEnemy.
+function CombatManager.registerSpawnTime(npc)
+	spawnTimes[npc] = os.clock()
+end
+
 function CombatManager.tryAttack(npc, target, data)
+	if not isNpcAlive(npc) then return end
+
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return end
 
 	local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
 	if not targetRoot then return end
 
+	local targetHum = target.Character and target.Character:FindFirstChildOfClass("Humanoid")
+	if not targetHum or targetHum.Health <= 0 then return end
+
 	if activeAnimations[npc] then return end
 
 	if not lastAttackTimes[npc] then lastAttackTimes[npc] = {} end
 
-	local timeAlive = os.clock() - (spawnTimes[npc] or os.clock()) -- NEW
+	local timeAlive = os.clock() - (spawnTimes[npc] or os.clock())
 
 	local dist = (npcRoot.Position - targetRoot.Position).Magnitude
 
@@ -165,7 +178,8 @@ function CombatManager.tryAttack(npc, target, data)
 	for _, attack in ipairs(data.Attacks) do
 		if not attack then continue end
 
-		if attack.UnlockAfter and timeAlive < attack.UnlockAfter then continue end -- NEW
+		-- Skip attacks that haven't unlocked yet for this NPC
+		if attack.UnlockAfter and timeAlive < attack.UnlockAfter then continue end
 
 		local lastTime = lastAttackTimes[npc][attack.Name] or 0
 		if dist <= attack.Range and os.clock() - lastTime >= attack.Cooldown then
@@ -213,7 +227,8 @@ function CombatManager.tryAttack(npc, target, data)
 
 	local animDone = false
 	local hitboxDone = false
-	local hitboxSpawned = false -- prevents double-spawn if marker fires after telegraph already gated it
+
+	local castAppearance = chosen.CastAppearance
 
 	local function tryRelease()
 		if animDone and hitboxDone then
@@ -225,59 +240,49 @@ function CombatManager.tryAttack(npc, target, data)
 
 	track.Stopped:Connect(function()
 		animDone = true
+		if castAppearance and castAppearance.Enabled then
+			AppearanceManager.restoreModel(npc, castAppearance.FadeOutTime)
+		end
 		tryRelease()
 	end)
 
 	SoundManager.play(chosen.Sounds and chosen.Sounds.Swing, npcRoot.Position)
 
+	-- Telegraph: cosmetic highlight that plays alongside the swing.
+	-- Hitbox spawn timing is driven purely by the Hit marker below;
+	-- Telegraph.Duration does not gate or delay the hitbox.
 	local telegraph = chosen.Telegraph
-	local gatesHitbox = telegraph and telegraph.Enabled and telegraph.GatesHitbox
-
-	local function doSpawnHitbox()
-		if hitboxSpawned then return end
-		hitboxSpawned = true
-
-		if not isNpcAlive(npc) then
-			hitboxDone = true
-			tryRelease()
-			return
-		end
-
-		spawnHitbox(npcRoot, npc, chosen, function()
-			hitboxDone = true
-			tryRelease()
-		end)
+	if telegraph and telegraph.Enabled then
+		TelegraphManager.play(npc, telegraph, function() end)
 	end
 
-	-- Start telegraph at swing start (visual cue), regardless of gating mode
-	if telegraph and telegraph.Enabled then
-		TelegraphManager.play(npc, telegraph, function()
-			-- Only this branch actually spawns the hitbox when gating is enabled
-			if gatesHitbox then
-				doSpawnHitbox()
-			end
-		end)
+	-- Cast appearance: tints the NPC's body color while the attack winds up.
+	if castAppearance and castAppearance.Enabled then
+		AppearanceManager.tintModel(npc, castAppearance.Color, castAppearance.FadeInTime)
 	end
 
 	track:Play(nil, nil, chosen.AttackSpeed or 1)
 
 	track:GetMarkerReachedSignal("Hit"):Connect(function()
-		-- If gated, the telegraph's onReady is responsible for spawning — skip here
-		if gatesHitbox then return end
-		doSpawnHitbox()
+		if not isNpcAlive(npc) then
+			hitboxDone = true
+			tryRelease()
+			return
+		end
+		spawnHitbox(npcRoot, npc, chosen, function()
+			hitboxDone = true
+			tryRelease()
+		end)
 	end)
 end
 
 function CombatManager.cleanup(npc)
 	TelegraphManager.cancel(npc)
+	AppearanceManager.cleanup(npc)
 	lastAttackTimes[npc] = nil
 	activeAnimations[npc] = nil
 	lastAttackEnd[npc] = nil
-	spawnTimes[npc] = nil -- NEW
-end
-
-function CombatManager.registerSpawnTime(npc)
-	spawnTimes[npc] = os.clock()
+	spawnTimes[npc] = nil
 end
 
 return CombatManager
