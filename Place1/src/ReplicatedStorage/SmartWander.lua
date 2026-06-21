@@ -1,9 +1,10 @@
 return function()
 	local SmartWander = {}
 
-	local isWandering     = false
-	local wanderCoroutine  = nil
-	local lastWanderCheck  = os.clock() -- ensures first check is delayed by the interval, gives idle beat on spawn
+	local isWandering      = false
+	local wanderGeneration  = 0 -- invalidates stale hooks/loops from a previous wander run
+	local wanderCoroutine   = nil
+	local lastWanderCheck   = os.clock() -- ensures first check is delayed by the interval, gives idle beat on spawn
 
 	local defaultSettings = {
 		WANDER_CHECK_INTERVAL = 3,
@@ -57,19 +58,6 @@ return function()
 	-- Tries to find a walkable spot that isn't behind a closed door.
 	-- ─────────────────────────────────────────────────────────────
 
-	-- findValidWanderPosition(enemyChar, maxAttempts, options, settings)
-	--
-	-- options (all optional):
-	--   biasAngle  (number) – preferred world-space angle in radians.
-	--   biasSpread (number) – half-width of the bias cone in radians (default π/2).
-	--   minDist    (number) – minimum candidate distance.
-	--   maxDist    (number) – maximum candidate distance.
-	--   avoidPositions (table) – list of Vector3 to stay away from.
-	--   avoidRadius    (number) – min distance from each avoid point.
-	--   avoidDoorsInPath (bool) – use PathfindingService to reject paths through closed doors.
-	--
-	-- settings – the merged settings table from startWandering (used for
-	--            BreaksDoors / DoorsFolder / debugPrint).
 	function SmartWander.findValidWanderPosition(enemyChar, maxAttempts, options, settings)
 		local enemyHRT = enemyChar:FindFirstChild("HumanoidRootPart")
 		if not enemyHRT then return nil end
@@ -107,7 +95,6 @@ return function()
 				math.cos(angle) * distance, 0, math.sin(angle) * distance
 			)
 
-			-- Floor check
 			local floorResult = workspace:Raycast(
 				candidate + Vector3.new(0, 10, 0),
 				Vector3.new(0, -20, 0),
@@ -121,7 +108,6 @@ return function()
 				if isWalkable then
 					local finalPos = floorResult.Position + Vector3.new(0, 3, 0)
 
-					-- Reject candidates too close to any avoid position
 					if avoidRadius > 0 then
 						local tooClose = false
 						for _, avoidPos in ipairs(avoidPositions) do
@@ -132,7 +118,6 @@ return function()
 						if tooClose then continue end
 					end
 
-					-- Door check: pathfinding-based or raycast fallback
 					if avoidDoorsInPath and settings and settings.DoorsFolder then
 						local pfs  = game:GetService("PathfindingService")
 						local path = pfs:CreatePath({ AgentRadius = 2.5, AgentCanJump = true })
@@ -183,7 +168,6 @@ return function()
 			end
 		end
 
-		-- Fallback: small random nudge from current position
 		return startPosition + Vector3.new(math.random(-5, 5), 0, math.random(-5, 5))
 	end
 
@@ -194,13 +178,17 @@ return function()
 	-- does NOT touch AgentRadius / AgentHeight / Costs / WaypointSpacing.
 	-- Those are physical/hazard properties of the NPC set once in
 	-- EnemyManager.setupEnemy and must persist across both combat and
-	-- wander states. Resetting them here was the cause of NPCs ignoring
-	-- AgentCosts (e.g. walking into lava) and getting a different,
-	-- more angular path shape than their normal combat pathing.
+	-- wander states.
+	--
+	-- myGen is the generation number captured by startWandering. Every
+	-- hook and wait-loop checks wanderGeneration == myGen before acting,
+	-- so if stopWandering() is called mid-flight (bumping the generation),
+	-- any in-flight hooks fired by Forbidden's internal coroutines become
+	-- harmless no-ops instead of corrupting state after combat has begun.
 	-- ─────────────────────────────────────────────────────────────
 
-	function SmartWander.wanderToPosition(enemyChar, ai, targetPosition, settings)
-		if not isWandering or not enemyChar or not enemyChar.Parent then return false end
+	function SmartWander.wanderToPosition(enemyChar, ai, targetPosition, settings, myGen)
+		if not isWandering or wanderGeneration ~= myGen or not enemyChar or not enemyChar.Parent then return false end
 		if not targetPosition then return false end
 
 		SmartWander.cleanupBodyGyro(enemyChar)
@@ -210,10 +198,12 @@ return function()
 		config.Tracking.Enabled      = false
 		config.Visualization.Enabled = settings.visualize or false
 
-		local reachedGoal = false -- NEW
-		local pathFailed  = false -- NEW
+		local reachedGoal = false
+		local pathFailed  = false
 
 		config.Hooks.PathfindingLinkReached = function(NPC, WP)
+			if wanderGeneration ~= myGen then return true end -- stale request, just let it pass through
+
 			if not WP.Label or not string.find(WP.Label, "Door") then return true end
 			if not settings.DoorsFolder then return true end
 
@@ -238,7 +228,9 @@ return function()
 		end
 
 		config.Hooks.PathingFailed = function(NPC, Target)
-			pathFailed = true -- NEW
+			if wanderGeneration ~= myGen then return false end -- stale, ignore
+
+			pathFailed = true
 			if settings.debugPrint then
 				settings.debugPrint("Could not pathfind to wander target")
 			end
@@ -246,11 +238,13 @@ return function()
 		end
 
 		config.Hooks.GoalReached = function(NPC, Target)
-			reachedGoal = true -- NEW
+			if wanderGeneration ~= myGen then return true end -- stale, ignore completely (no print, no facing)
+
+			reachedGoal = true
 			if settings.debugPrint then
 				settings.debugPrint("Reached wander point")
 			end
-			if isWandering and enemyChar and enemyChar.Parent then
+			if isWandering and wanderGeneration == myGen and enemyChar and enemyChar.Parent then
 				SmartWander.faceRandomDirection(enemyChar)
 			end
 			return true
@@ -258,17 +252,16 @@ return function()
 
 		ai.SmartPathfind(enemyChar, targetPosition)
 
-		-- Wait until pathfinding finishes (GoalReached/PathingFailed) or times out.
 		local startTime = os.clock()
-		while isWandering and not reachedGoal and not pathFailed and os.clock() - startTime < 12 do
-			task.wait(0.1) -- check more frequently so we don't overshoot
+		while isWandering and wanderGeneration == myGen and not reachedGoal and not pathFailed and os.clock() - startTime < 12 do
+			task.wait(0.1)
 		end
 
-		if isWandering and not reachedGoal then
+		if isWandering and wanderGeneration == myGen and not reachedGoal then
 			ai.Stop(enemyChar)
 		end
 
-		return reachedGoal
+		return reachedGoal and wanderGeneration == myGen
 	end
 
 	-- ─────────────────────────────────────────────────────────────
@@ -278,7 +271,6 @@ return function()
 	function SmartWander.startWandering(enemyChar, ai, customSettings)
 		if isWandering then return end
 
-		-- Merge custom settings over defaults
 		local settings = {}
 		for k, v in pairs(defaultSettings) do settings[k] = v end
 		if customSettings then
@@ -286,27 +278,31 @@ return function()
 		end
 
 		isWandering = true
+		wanderGeneration += 1
+		local myGen = wanderGeneration
+
 		if settings.debugPrint then
 			settings.debugPrint("No targets found, beginning wander...")
 		end
 		ai.Stop(enemyChar)
 
 		wanderCoroutine = task.spawn(function()
-			while isWandering and enemyChar and enemyChar.Parent do
+			while isWandering and wanderGeneration == myGen and enemyChar and enemyChar.Parent do
 				local wanderTarget = SmartWander.findValidWanderPosition(enemyChar, 8, {
 					minDist = settings.MinWanderDistance,
 					maxDist = settings.MaxWanderDistance,
 				}, settings)
 				SmartWander.cleanupBodyGyro(enemyChar)
 
-				local success = SmartWander.wanderToPosition(enemyChar, ai, wanderTarget, settings)
+				local success = SmartWander.wanderToPosition(enemyChar, ai, wanderTarget, settings, myGen)
+
+				if wanderGeneration ~= myGen then break end -- superseded mid-call, bail immediately
 
 				if success then
 					local minWait   = settings.MinWanderWait or 4
 					local maxWait   = settings.MaxWanderWait or 10
 					local waitTime  = math.random(minWait, maxWait)
 
-					-- DEBUG: confirm the actual wait values being used
 					if settings.debugPrint then
 						settings.debugPrint(string.format(
 							"Idling at wander point for %d seconds (range %d-%d)",
@@ -315,17 +311,16 @@ return function()
 					end
 
 					local waitStart = os.clock()
-					while isWandering and os.clock() - waitStart < waitTime do
+					while isWandering and wanderGeneration == myGen and os.clock() - waitStart < waitTime do
 						task.wait(1)
 					end
-					if isWandering and enemyChar and enemyChar.Parent then
+					if isWandering and wanderGeneration == myGen and enemyChar and enemyChar.Parent then
 						SmartWander.faceRandomDirection(enemyChar)
 					end
 				end
 			end
 
-			-- Final cleanup
-			if enemyChar and enemyChar.Parent then
+			if wanderGeneration == myGen and enemyChar and enemyChar.Parent then
 				ai.Stop(enemyChar)
 				SmartWander.cleanupBodyGyro(enemyChar)
 			end
@@ -339,6 +334,8 @@ return function()
 		if not isWandering then return end
 
 		isWandering = false
+		wanderGeneration += 1 -- invalidates ALL pending hooks/loops from the old run immediately
+
 		if wanderCoroutine then
 			task.cancel(wanderCoroutine)
 			wanderCoroutine = nil
@@ -358,7 +355,6 @@ return function()
 		return isWandering
 	end
 
-	-- Returns true once per WANDER_CHECK_INTERVAL seconds.
 	function SmartWander.shouldCheckForWander()
 		if os.clock() - lastWanderCheck > defaultSettings.WANDER_CHECK_INTERVAL then
 			lastWanderCheck = os.clock()
