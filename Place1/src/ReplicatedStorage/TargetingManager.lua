@@ -2,11 +2,12 @@ local TargetingManager = {}
 
 local Players = game:GetService("Players")
 
-function TargetingManager.getTarget(npc, data, overrideRange)
+function TargetingManager.getTarget(npc, data, overrideRange, overrideHeightLimit)
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return nil end
 
-	local searchRange = overrideRange or data.DetectionRange -- NEW: allow override
+	local searchRange = overrideRange or data.DetectionRange
+	local heightLimit = overrideHeightLimit or data.DetectionHeightLimit -- nil = no height restriction
 
 	local closest, closestDist = nil, math.huge
 
@@ -18,10 +19,20 @@ function TargetingManager.getTarget(npc, data, overrideRange)
 		local humanoid = char:FindFirstChildOfClass("Humanoid")
 		if not humanoid or humanoid.Health <= 0 then continue end
 
-		local dist = (root.Position - npcRoot.Position).Magnitude
-		if dist < closestDist and dist < searchRange then
+		if heightLimit then
+			local heightDiff = math.abs(root.Position.Y - npcRoot.Position.Y)
+			if heightDiff > heightLimit then continue end
+		end
+
+		local horizontalDist = Vector3.new(
+			root.Position.X - npcRoot.Position.X,
+			0,
+			root.Position.Z - npcRoot.Position.Z
+		).Magnitude
+
+		if horizontalDist < closestDist and horizontalDist < searchRange then
 			closest = player
-			closestDist = dist
+			closestDist = horizontalDist
 		end
 	end
 
