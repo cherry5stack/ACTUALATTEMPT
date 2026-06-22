@@ -13,9 +13,9 @@ local SmartWanderCtor  = require(rs.SmartWander)
 
 local enemiesFolder = workspace:WaitForChild("Enemies")
 
-local DEBUG              = false
-local DEBUG_PRINT_DIST   = false
-local DEBUG_PRINT_GROUND = false
+local DEBUG              = true
+local DEBUG_PRINT_DIST   = true
+local DEBUG_PRINT_GROUND = true
 local DEBUG_PRINT_FACE   = true -- NEW: prints face-lock decision every tick while a target exists
 
 local REPATH_INTERVAL    = 0.5
@@ -185,11 +185,12 @@ local function setupEnemy(npc)
 			if humanoid.Health <= 0 then break end
 
 			debugGroundCheck(npc, config.AgentInfo.Costs)
-
+			
 			local inPursuitWindow = os.clock() < pursuitActiveUntil
 			local searchRange = inPursuitWindow and (data.PursueRange or data.DetectionRange) or data.DetectionRange
+			local searchHeightLimit = inPursuitWindow and (data.PursueHeightLimit or data.DetectionHeightLimit) or data.DetectionHeightLimit
 
-			local newTarget = TargetingManager.getTarget(npc, data, searchRange)
+			local newTarget = TargetingManager.getTarget(npc, data, searchRange, searchHeightLimit)
 
 			if newTarget ~= currentTarget then
 				if newTarget == nil or os.clock() - swapTimer >= SWAP_DELAY then
@@ -277,7 +278,12 @@ local function setupEnemy(npc)
 					stuck.update(npc)
 
 					if not isAttacking and stuck.isStuck() then
-						forceRepath()
+						if stuck.shouldEscalateToRepath() then
+							stuck.resetUnstuckAttempts()
+							forceRepath()
+						else
+							stuck.attemptUnstuck(npc, currentTarget, AI)
+						end
 					else
 						local now = os.clock()
 						local shouldRepath = isAttacking
