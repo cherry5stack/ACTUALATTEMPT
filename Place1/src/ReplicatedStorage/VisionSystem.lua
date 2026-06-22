@@ -1,5 +1,8 @@
 local VisionSystem = {}
+local RunService = game:GetService("RunService")
+local activeFaceData: {[Model]: {target: any, connection: RBXScriptConnection}} = {}
 
+local RESPONSIVENESS = 2500 -- higher = snappier turning, tune by feel (try 5-12)
 -- ─────────────────────────────────────────────
 -- DEBUG CONFIG
 -- ─────────────────────────────────────────────
@@ -96,44 +99,63 @@ function VisionSystem.hasLineOfSight(npc, target)
 
 	return hasLOS
 end
-function VisionSystem.faceTarget(npc, target)
+
+function VisionSystem.faceTarget(npc: Model, target: Player)
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return end
 
-	local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
-	if not targetRoot then return end
-
-	local direction = (targetRoot.Position - npcRoot.Position)
-	local lookVector = Vector3.new(direction.X, 0, direction.Z).Unit
-	if lookVector.Magnitude < 0.1 then return end
-
-	local bodyGyro = npcRoot:FindFirstChild("FaceTargetGyro")
-	if not bodyGyro then
-		bodyGyro = Instance.new("BodyGyro")
-		bodyGyro.Name = "FaceTargetGyro"
-		bodyGyro.P = 20000
-		bodyGyro.D = 500
-		bodyGyro.MaxTorque = Vector3.new(0, 500000, 0)
-		bodyGyro.Parent = npcRoot
-		print(string.format("[%s] FACE LOCK ON -> %s", npc.Name, target.Name))
+	if activeFaceData[npc] then
+		activeFaceData[npc].target = target
+		return
 	end
 
-	bodyGyro.CFrame = CFrame.lookAt(npcRoot.Position, npcRoot.Position + lookVector)
+	local attachment = Instance.new("Attachment")
+	attachment.Name = "FaceTargetAttachment"
+	attachment.Parent = npcRoot
 
-	local currentLook = npcRoot.CFrame.LookVector
-	local dot = currentLook:Dot(lookVector)
-	local angleDeg = math.deg(math.acos(math.clamp(dot, -1, 1)))
-	print(string.format("[%s] facing %s | angle off: %.1f°", npc.Name, target.Name, angleDeg))
+	local align = Instance.new("AlignOrientation")
+	align.Name = "FaceTargetAlign"
+	align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+	align.Attachment0 = attachment
+	align.RigidityEnabled = false
+	
+	align.Responsiveness = RESPONSIVENESS
+	--align.Responsiveness = lerp(maxResp, minResp, dist / faceRange)
+	--this line is to turn speed to scale with distance (e.g. snap faster when close, slower when far) is needed
+	
+	align.MaxTorque = math.huge
+	align.MaxAngularVelocity = math.huge
+	align.Parent = npcRoot
+
+	local data = {target = target, align = align, connection = nil}
+	activeFaceData[npc] = data
+
+	data.connection = RunService.Heartbeat:Connect(function()
+		local root = npc:FindFirstChild("HumanoidRootPart")
+		local targetChar = data.target and data.target.Character
+		local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+		if not root or not targetRoot then return end
+
+		local direction = targetRoot.Position - root.Position
+		local flat = Vector3.new(direction.X, 0, direction.Z)
+		if flat.Magnitude < 0.1 then return end
+
+		-- AlignOrientation.CFrame is the GOAL orientation in world space
+		align.CFrame = CFrame.lookAt(Vector3.new(), flat.Unit)
+	end)
 end
 
-function VisionSystem.stopFacing(npc)
+function VisionSystem.stopFacing(npc: Model)
+	local data = activeFaceData[npc]
+	if data then
+		if data.connection then data.connection:Disconnect() end
+		if data.align then data.align:Destroy() end
+		activeFaceData[npc] = nil
+	end
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-	if not npcRoot then return end
-	local bodyGyro = npcRoot:FindFirstChild("FaceTargetGyro")
-	if bodyGyro then
-		bodyGyro:Destroy()
-		print(string.format("[%s] FACE LOCK OFF", npc.Name))
+	if npcRoot then
+		local attachment = npcRoot:FindFirstChild("FaceTargetAttachment")
+		if attachment then attachment:Destroy() end
 	end
 end
-
 return VisionSystem
