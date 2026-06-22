@@ -44,8 +44,16 @@ function VisionSystem.hasLineOfSight(npc, target)
 	if not targetRoot then return false end
 
 	local params = RaycastParams.new()
-	params.FilterDescendantsInstances = { npc, targetChar }
 	params.FilterType = Enum.RaycastFilterType.Exclude
+
+	local filterList = { npc, targetChar }
+	local Players = game:GetService("Players")
+	for _, player in Players:GetPlayers() do
+		if player.Character then
+			table.insert(filterList, player.Character)
+		end
+	end
+	params.FilterDescendantsInstances = filterList
 
 	local npcEye = npcRoot.Position + Vector3.new(0, 1.5, 0)
 
@@ -88,7 +96,6 @@ function VisionSystem.hasLineOfSight(npc, target)
 
 	return hasLOS
 end
-
 function VisionSystem.faceTarget(npc, target)
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return end
@@ -104,20 +111,29 @@ function VisionSystem.faceTarget(npc, target)
 	if not bodyGyro then
 		bodyGyro = Instance.new("BodyGyro")
 		bodyGyro.Name = "FaceTargetGyro"
-		bodyGyro.P = 8000
-		bodyGyro.D = 400
-		bodyGyro.MaxTorque = Vector3.new(0, 100000, 0)
+		bodyGyro.P = 20000
+		bodyGyro.D = 500
+		bodyGyro.MaxTorque = Vector3.new(0, 500000, 0)
 		bodyGyro.Parent = npcRoot
+		print(string.format("[%s] FACE LOCK ON -> %s", npc.Name, target.Name))
 	end
 
 	bodyGyro.CFrame = CFrame.lookAt(npcRoot.Position, npcRoot.Position + lookVector)
+
+	local currentLook = npcRoot.CFrame.LookVector
+	local dot = currentLook:Dot(lookVector)
+	local angleDeg = math.deg(math.acos(math.clamp(dot, -1, 1)))
+	print(string.format("[%s] facing %s | angle off: %.1f°", npc.Name, target.Name, angleDeg))
 end
 
 function VisionSystem.stopFacing(npc)
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return end
 	local bodyGyro = npcRoot:FindFirstChild("FaceTargetGyro")
-	if bodyGyro then bodyGyro:Destroy() end
+	if bodyGyro then
+		bodyGyro:Destroy()
+		print(string.format("[%s] FACE LOCK OFF", npc.Name))
+	end
 end
 
 return VisionSystem
