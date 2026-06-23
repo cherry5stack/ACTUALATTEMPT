@@ -6,6 +6,7 @@ local Debris = game:GetService("Debris")
 local SoundManager = require(ReplicatedStorage:WaitForChild("SoundManager"))
 local TelegraphManager = require(ReplicatedStorage:WaitForChild("TelegraphManager"))
 local AppearanceManager = require(ReplicatedStorage:WaitForChild("AppearanceManager"))
+local PhaseManager = require(ReplicatedStorage:WaitForChild("PhaseManager"))
 local DamageEvent = ReplicatedStorage:WaitForChild("DamageEvent")
 local ParticleEvent = ReplicatedStorage:WaitForChild("ParticleEvent")
 
@@ -157,6 +158,8 @@ end
 function CombatManager.tryAttack(npc, target, data)
 	if not isNpcAlive(npc) then return end
 
+	if PhaseManager.isTransitioning(npc) then return end
+
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return end
 
@@ -180,6 +183,9 @@ function CombatManager.tryAttack(npc, target, data)
 
 		-- Skip attacks that haven't unlocked yet for this NPC
 		if attack.UnlockAfter and timeAlive < attack.UnlockAfter then continue end
+
+		-- Skip attacks that require a phase this NPC hasn't reached yet
+		if attack.RequiresPhase and PhaseManager.getCurrentPhase(npc) < attack.RequiresPhase then continue end
 
 		local lastTime = lastAttackTimes[npc][attack.Name] or 0
 		if dist <= attack.Range and os.clock() - lastTime >= attack.Cooldown then
@@ -279,6 +285,7 @@ end
 function CombatManager.cleanup(npc)
 	TelegraphManager.cancel(npc)
 	AppearanceManager.cleanup(npc)
+	PhaseManager.cleanup(npc)
 	lastAttackTimes[npc] = nil
 	activeAnimations[npc] = nil
 	lastAttackEnd[npc] = nil
