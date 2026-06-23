@@ -11,13 +11,14 @@ local StuckRecovery    = require(rs.StuckRecovery)
 local SoundManager     = require(rs.SoundManager)
 local SmartWanderCtor  = require(rs.SmartWander)
 local PhaseManager     = require(rs.PhaseManager)
+local DoorOpener       = require(rs.DoorOpener)
 
 local enemiesFolder = workspace:WaitForChild("Enemies")
 
 local DEBUG              = true
 local DEBUG_PRINT_DIST   = true
 local DEBUG_PRINT_GROUND = true
-local DEBUG_PRINT_FACE   = true -- NEW: prints face-lock decision every tick while a target exists
+local DEBUG_PRINT_FACE   = true -- prints face-lock decision every tick while a target exists
 
 local REPATH_INTERVAL    = 0.5
 local lastFootstep       = {}
@@ -92,7 +93,7 @@ local function setupEnemy(npc)
 		config.Tracking.Enabled = true
 		config.Hooks.PathingFailed = defaultPathingFailed
 		config.Hooks.GoalReached = nil
-		config.Hooks.PathfindingLinkReached = nil
+		config.Hooks.PathfindingLinkReached = DoorOpener.onPathfindingLinkReached -- FIXED: was nil, which errors when a door waypoint is hit
 	end
 
 	config.Tracking.Enabled                      = true
@@ -185,6 +186,16 @@ local function setupEnemy(npc)
 			task.wait(0.1)
 
 			if humanoid.Health <= 0 then break end
+
+			-- Safety net for the void: FallenPartsDestroyHeight does not
+			-- reliably route through Health=0/Humanoid.Died — some reported
+			-- cases leave the Model + Humanoid intact while its body parts
+			-- are wiped out from under it. If HumanoidRootPart vanishes,
+			-- treat this as dead and stop looping, even though neither
+			-- Health nor npc.Parent changed.
+			if not npc:FindFirstChild("HumanoidRootPart") then
+				break
+			end
 
 			debugGroundCheck(npc, config.AgentInfo.Costs)
 
@@ -318,7 +329,11 @@ local function setupEnemy(npc)
 			end
 		end
 
-		if npc.Parent == nil then
+		-- Runs whether the loop exited via npc.Parent becoming nil OR via
+		-- the HumanoidRootPart safety-net break above. Either way, the NPC
+		-- is effectively gone and needs full cleanup, regardless of
+		-- whether Humanoid.Died ever actually fired.
+		if npc.Parent == nil or not npc:FindFirstChild("HumanoidRootPart") then
 			if wander then wander.stopWandering(npc, AI) end
 			CombatManager.cleanup(npc)
 			VisionSystem.stopFacing(npc)
