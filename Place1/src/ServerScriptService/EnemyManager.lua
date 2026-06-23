@@ -10,6 +10,7 @@ local CombatManager    = require(rs.CombatManager)
 local StuckRecovery    = require(rs.StuckRecovery)
 local SoundManager     = require(rs.SoundManager)
 local SmartWanderCtor  = require(rs.SmartWander)
+local PhaseManager     = require(rs.PhaseManager)
 
 local enemiesFolder = workspace:WaitForChild("Enemies")
 
@@ -73,6 +74,7 @@ local function setupEnemy(npc)
 	end
 
 	CombatManager.registerSpawnTime(npc)
+	PhaseManager.registerPhases(npc, data.PhaseTransitions, data.PhaseCooldown)
 
 	humanoid.MaxHealth = data.Health
 	humanoid.Health    = data.Health
@@ -185,7 +187,17 @@ local function setupEnemy(npc)
 			if humanoid.Health <= 0 then break end
 
 			debugGroundCheck(npc, config.AgentInfo.Costs)
-			
+
+			-- Phase transitions: check HP thresholds and possibly begin a
+			-- freeze/animation window. If currently transitioning, skip
+			-- targeting/attack logic entirely this tick.
+			PhaseManager.update(npc, humanoid, AI)
+
+			if PhaseManager.isTransitioning(npc) then
+				stuck.suppress() -- standing still on purpose, don't false-trigger StuckRecovery
+				continue
+			end
+
 			local inPursuitWindow = os.clock() < pursuitActiveUntil
 			local searchRange = inPursuitWindow and (data.PursueRange or data.DetectionRange) or data.DetectionRange
 			local searchHeightLimit = inPursuitWindow and (data.PursueHeightLimit or data.DetectionHeightLimit) or data.DetectionHeightLimit
