@@ -89,11 +89,19 @@ local function setupEnemy(npc)
 		end
 	end
 
-	local function applyCombatConfig()
+	local function applyCombatConfig(currentTarget)
 		config.Tracking.Enabled = true
-		config.Hooks.PathingFailed = defaultPathingFailed
+		config.DirectMoveTo.Enabled = false
 		config.Hooks.GoalReached = nil
-		config.Hooks.PathfindingLinkReached = DoorOpener.onPathfindingLinkReached -- FIXED: was nil, which errors when a door waypoint is hit
+		config.Hooks.PathfindingLinkReached = DoorOpener.onPathfindingLinkReached
+		config.Hooks.PathingFailed = function(npc, reason)
+			defaultPathingFailed(npc, reason)
+			task.delay(0.6, function()
+				if currentTarget and humanoid.Health > 0 then
+					AI.SmartPathfind(npc, currentTarget)
+				end
+			end)
+		end
 	end
 
 	config.Tracking.Enabled                      = true
@@ -230,7 +238,7 @@ local function setupEnemy(npc)
 							wander.stopWandering(npc, AI)
 						end
 						if wander then wander.cleanupBodyGyro(npc) end -- defensive, in case stopWandering's cleanup raced
-						applyCombatConfig()
+						applyCombatConfig(currentTarget)
 						AI.SmartPathfind(npc, currentTarget)
 
 						pursuitActiveUntil = os.clock() + (data.PursueLingerTime or 0)
