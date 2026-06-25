@@ -18,10 +18,13 @@ local enemiesFolder = workspace:WaitForChild("Enemies")
 local DEBUG              = true
 local DEBUG_PRINT_DIST   = true
 local DEBUG_PRINT_GROUND = true
-local DEBUG_PRINT_FACE   = true -- prints face-lock decision every tick while a target exists
+local DEBUG_PRINT_FACE   = true
 
 local REPATH_INTERVAL    = 0.5
 local lastFootstep       = {}
+
+-- Tracks consecutive path failures per NPC so we know when to try door opening
+local pathFailCount = {}
 
 local function debugGroundCheck(npc, agentCosts)
 	if not DEBUG_PRINT_GROUND then return end
@@ -57,6 +60,60 @@ local function debugGroundCheck(npc, agentCosts)
 			end
 		end
 	end
+end
+
+-- Raycasts from NPC toward target and walks up the hit instance's ancestry
+-- looking for a door with an Open BoolValue. If found and closed, opens it.
+-- Returns true if a door was found and opened.
+local function tryOpenBlockingDoor(npc, target)
+	if not target or not target.Character then return false end
+
+	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
+	local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+	if not npcRoot or not targetRoot then return false end
+
+	local origin    = npcRoot.Position + Vector3.new(0, 1, 0) -- slight upward offset so we don't hit the floor
+	local direction = targetRoot.Position - origin
+
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = { npc, target.Character }
+	params.FilterType = Enum.RaycastFilterType.Exclude
+
+	local result = workspace:Raycast(origin, direction, params)
+	if not result then return false end
+
+	-- Walk up ancestry up to 5 levels looking for a door Open value
+	local inst = result.Instance
+	for _ = 1, 5 do
+		if not inst then break end
+
+		-- Pattern 1: Open BoolValue directly on this instance
+		local openVal = inst:FindFirstChild("Open")
+		if openVal and openVal:IsA("BoolValue") and openVal.Value == false then
+			if DEBUG then
+				print(string.format("[%s] tryOpenBlockingDoor: opening door via direct Open on '%s'", npc.Name, inst:GetFullName()))
+			end
+			openVal.Value = true
+			return true
+		end
+
+		-- Pattern 2: Door script child containing Open (matches your DoorOpener structure)
+		local doorScript = inst:FindFirstChild("Door")
+		if doorScript then
+			local openVal2 = doorScript:FindFirstChild("Open")
+			if openVal2 and openVal2:IsA("BoolValue") and openVal2.Value == false then
+				if DEBUG then
+					print(string.format("[%s] tryOpenBlockingDoor: opening door via Door.Open on '%s'", npc.Name, inst:GetFullName()))
+				end
+				openVal2.Value = true
+				return true
+			end
+		end
+
+		inst = inst.Parent
+	end
+
+	return false
 end
 
 local function setupEnemy(npc)
@@ -96,6 +153,10 @@ local function setupEnemy(npc)
 		config.Hooks.PathfindingLinkReached = DoorOpener.onPathfindingLinkReached
 		config.Hooks.PathingFailed = function(npc, reason)
 			defaultPathingFailed(npc, reason)
+
+			-- Count consecutive failures so the door opener knows when to kick in
+			pathFailCount[npc] = (pathFailCount[npc] or 0) + 1
+
 			task.delay(0.6, function()
 				if currentTarget and humanoid.Health > 0 then
 					AI.SmartPathfind(npc, currentTarget)
@@ -104,13 +165,13 @@ local function setupEnemy(npc)
 		end
 	end
 
-	config.Tracking.Enabled                      = true
-	config.Tracking.CollinearTargetPositionOffset = 0
-	config.AgentInfo.AgentRadius                 = data.AgentRadius
-	config.AgentInfo.AgentHeight                 = data.AgentHeight
-	config.AgentInfo.Costs                       = data.AgentCosts or { Obstacle = math.huge }
-	config.DirectMoveTo.Enabled                  = false
-	config.Hooks.PathingFailed                   = defaultPathingFailed
+	config.Tracking.Enabled                       = true
+	config.Tracking.CollinearTargetPositionOffset  = 0
+	config.AgentInfo.AgentRadius                  = data.AgentRadius
+	config.AgentInfo.AgentHeight                  = data.AgentHeight
+	config.AgentInfo.Costs                        = data.AgentCosts or { Obstacle = math.huge }
+	config.DirectMoveTo.Enabled                   = false
+	config.Hooks.PathingFailed                    = defaultPathingFailed
 
 	AI.InsertAntiLag(npc)
 
@@ -140,6 +201,7 @@ local function setupEnemy(npc)
 			SoundManager.play(data.Sounds and data.Sounds.Death, root.Position)
 		end
 		lastFootstep[npc] = nil
+		pathFailCount[npc] = nil
 		if wander then wander.stopWandering(npc, AI) end
 		AI.Stop(npc)
 		CombatManager.cleanup(npc)
@@ -160,13 +222,19 @@ local function setupEnemy(npc)
 	end)
 
 	task.spawn(function()
-		local currentTarget  = nil
-		local isAttacking    = false
-		local attackStandPos = nil
-		local swapTimer      = 0
-		local rePathTimer    = 0
-		local SWAP_DELAY     = 1
+		local currentTarget      = nil
+		local isAttacking        = false
+		local attackStandPos     = nil
+		local swapTimer          = 0
+		local rePathTimer        = 0
+		local SWAP_DELAY         = 1
 		local pursuitActiveUntil = 0
+		local lastDoorOpenAttempt = 0
+		-- How many consecutive path failures before we try the door raycast.
+		-- 3 is enough to avoid false-positives from momentary map jitter.
+		local DOOR_OPEN_FAIL_THRESHOLD = 3
+		-- Cooldown so we don't hammer the door open logic every tick.
+		local DOOR_OPEN_COOLDOWN = 2
 
 		local stuck = StuckRecovery()
 
@@ -195,30 +263,21 @@ local function setupEnemy(npc)
 
 			if humanoid.Health <= 0 then break end
 
-			-- Safety net for the void: FallenPartsDestroyHeight does not
-			-- reliably route through Health=0/Humanoid.Died — some reported
-			-- cases leave the Model + Humanoid intact while its body parts
-			-- are wiped out from under it. If HumanoidRootPart vanishes,
-			-- treat this as dead and stop looping, even though neither
-			-- Health nor npc.Parent changed.
 			if not npc:FindFirstChild("HumanoidRootPart") then
 				break
 			end
 
 			debugGroundCheck(npc, config.AgentInfo.Costs)
 
-			-- Phase transitions: check HP thresholds and possibly begin a
-			-- freeze/animation window. If currently transitioning, skip
-			-- targeting/attack logic entirely this tick.
 			PhaseManager.update(npc, humanoid, AI)
 
 			if PhaseManager.isTransitioning(npc) then
-				stuck.suppress() -- standing still on purpose, don't false-trigger StuckRecovery
+				stuck.suppress()
 				continue
 			end
 
-			local inPursuitWindow = os.clock() < pursuitActiveUntil
-			local searchRange = inPursuitWindow and (data.PursueRange or data.DetectionRange) or data.DetectionRange
+			local inPursuitWindow   = os.clock() < pursuitActiveUntil
+			local searchRange       = inPursuitWindow and (data.PursueRange or data.DetectionRange) or data.DetectionRange
 			local searchHeightLimit = inPursuitWindow and (data.PursueHeightLimit or data.DetectionHeightLimit) or data.DetectionHeightLimit
 
 			local newTarget = TargetingManager.getTarget(npc, data, searchRange, searchHeightLimit)
@@ -232,12 +291,13 @@ local function setupEnemy(npc)
 					rePathTimer   = 0
 					resetAttackState()
 					stuck.reset(npc)
+					pathFailCount[npc] = 0 -- reset failure counter on target change
 
 					if currentTarget then
 						if wander and wander.isWandering() then
 							wander.stopWandering(npc, AI)
 						end
-						if wander then wander.cleanupBodyGyro(npc) end -- defensive, in case stopWandering's cleanup raced
+						if wander then wander.cleanupBodyGyro(npc) end
 						applyCombatConfig(currentTarget)
 						AI.SmartPathfind(npc, currentTarget)
 
@@ -270,9 +330,9 @@ local function setupEnemy(npc)
 				local hasLOS  = VisionSystem.hasLineOfSight(npc, currentTarget)
 				local los     = inRange and hasLOS
 
-				local faceRange = data.FaceTargetRange or data.AttackDistance
+				local faceRange       = data.FaceTargetRange or data.AttackDistance
 				local withinFaceRange = dist <= faceRange
-				local faceLos = withinFaceRange and hasLOS
+				local faceLos         = withinFaceRange and hasLOS
 
 				if DEBUG_PRINT_FACE then
 					print(string.format(
@@ -299,6 +359,7 @@ local function setupEnemy(npc)
 
 					rePathTimer = os.clock()
 					stuck.suppress()
+					pathFailCount[npc] = 0 -- in range and has LOS, path is clearly fine
 
 					if attackStandPos then
 						humanoid:MoveTo(attackStandPos)
@@ -308,6 +369,31 @@ local function setupEnemy(npc)
 				else
 					stuck.update(npc)
 
+					-- Check if we've been failing to path long enough that a door
+					-- is probably the culprit, and try to open it proactively.
+					local failures = pathFailCount[npc] or 0
+					local now      = os.clock()
+					if failures >= DOOR_OPEN_FAIL_THRESHOLD
+						and now - lastDoorOpenAttempt >= DOOR_OPEN_COOLDOWN
+					then
+						lastDoorOpenAttempt = now
+						local opened = tryOpenBlockingDoor(npc, currentTarget)
+						if opened then
+							if DEBUG then
+								print(string.format("[%s] Proactively opened blocking door, repathing.", npc.Name))
+							end
+							pathFailCount[npc] = 0
+							-- Give the door a moment to physically open before repathing
+							task.delay(0.5, function()
+								if currentTarget and humanoid.Health > 0 then
+									AI.Stop(npc)
+									AI.SmartPathfind(npc, currentTarget)
+									rePathTimer = os.clock()
+								end
+							end)
+						end
+					end
+
 					if not isAttacking and stuck.isStuck() then
 						if stuck.shouldEscalateToRepath() then
 							stuck.resetUnstuckAttempts()
@@ -316,7 +402,6 @@ local function setupEnemy(npc)
 							stuck.attemptUnstuck(npc, currentTarget, AI)
 						end
 					else
-						local now = os.clock()
 						local shouldRepath = isAttacking
 							or (now - rePathTimer >= REPATH_INTERVAL)
 
@@ -337,10 +422,6 @@ local function setupEnemy(npc)
 			end
 		end
 
-		-- Runs whether the loop exited via npc.Parent becoming nil OR via
-		-- the HumanoidRootPart safety-net break above. Either way, the NPC
-		-- is effectively gone and needs full cleanup, regardless of
-		-- whether Humanoid.Died ever actually fired.
 		if npc.Parent == nil or not npc:FindFirstChild("HumanoidRootPart") then
 			if wander then wander.stopWandering(npc, AI) end
 			CombatManager.cleanup(npc)
