@@ -66,9 +66,15 @@ local function monitorPassthrough(NPC: Instance, doorModel: Model)
 		while os.clock() < deadline do
 			task.wait(STUCK_POLL)
 
-			-- NPC died / was removed mid-crossing
 			if not NPC.Parent or not NPC:FindFirstChild("HumanoidRootPart") then
 				dbg(npcName, "NPC removed during door crossing — monitoring stopped.")
+				return
+			end
+
+			-- If the NPC is far enough from the door, it has clearly passed through
+			local distFromDoor = (doorModel:GetPivot().Position - root.Position).Magnitude
+			if distFromDoor > 8 then
+				dbg(npcName, string.format("Cleared door '%s' (%.2f studs away).", doorName, distFromDoor))
 				return
 			end
 
@@ -76,10 +82,32 @@ local function monitorPassthrough(NPC: Instance, doorModel: Model)
 			local speed = (currentPos - lastPos).Magnitude / STUCK_POLL
 			lastPos = currentPos
 
+			-- NPC is slow/stopped near the door
 			if speed < STUCK_THRESHOLD then
 				stuckSecs += STUCK_POLL
 
-				-- Check whether the NPC is actually overlapping a door part
+				-- Check if the NPC is actually in combat range of a player —
+				-- if so, standing still is intentional, not a stuck condition
+				local Players = game:GetService("Players")
+				local inCombat = false
+				for _, player in Players:GetPlayers() do
+					local char = player.Character
+					local targetRoot = char and char:FindFirstChild("HumanoidRootPart")
+					if targetRoot then
+						local distToPlayer = (root.Position - targetRoot.Position).Magnitude
+						if distToPlayer <= 6 then -- generous combat range check
+							inCombat = true
+							break
+						end
+					end
+				end
+
+				if inCombat then
+					dbg(npcName, "NPC is in combat near door — not stuck, stopping monitor.")
+					return
+				end
+
+				-- Only then check if it's near a door part
 				local closestPart, closestDist = nil, math.huge
 				for _, part in ipairs(doorModel:GetDescendants()) do
 					if part:IsA("BasePart") then
@@ -91,37 +119,32 @@ local function monitorPassthrough(NPC: Instance, doorModel: Model)
 					end
 				end
 
-				local nearDoor = closestPart and closestDist < 5  -- studs
+				local nearDoor = closestPart and closestDist < 5
 
 				if nearDoor then
 					warn_dbg(npcName, string.format(
 						"STUCK near door part '%s' (dist=%.2f studs, speed=%.2f studs/s, stuck for %.1fs)",
 						closestPart.Name, closestDist, speed, stuckSecs
 						))
-				else
-					dbg(npcName, string.format(
-						"Slow but not near door geometry (speed=%.2f studs/s) — may just be pathing.", speed
-						))
 				end
 			else
 				if stuckSecs > 0 then
-					dbg(npcName, string.format("Resumed moving (speed=%.2f studs/s) after being slow for %.1fs.", speed, stuckSecs))
+					dbg(npcName, string.format("Resumed moving (speed=%.2f studs/s).", speed))
 				end
 				stuckSecs = 0
 			end
 		end
 
-		-- Final check: did they actually get through?
 		if NPC.Parent and NPC:FindFirstChild("HumanoidRootPart") then
 			local finalDist = (doorModel:GetPivot().Position - root.Position).Magnitude
 			if finalDist < 5 then
 				warn_dbg(npcName, string.format(
-					"TIMEOUT — NPC is still %.2f studs from door '%s' after %.1fs. Likely stuck ON the door.",
-					finalDist, doorName, CLEAR_TIMEOUT
+					"TIMEOUT — NPC still %.2f studs from door '%s'.",
+					finalDist, doorName
 					))
 			else
 				dbg(npcName, string.format(
-					"Cleared door '%s' successfully (%.2f studs away at timeout).",
+					"Cleared door '%s' (%.2f studs away at timeout).",
 					doorName, finalDist
 					))
 			end
@@ -134,6 +157,7 @@ end
 -- (NPC: Instance, Waypoint: PathWaypoint) -> boolean
 -- ─────────────────────────────────────────────
 function DoorOpener.onPathfindingLinkReached(NPC: Instance, Waypoint: PathWaypoint): boolean
+	print("LINK REACHED", Waypoint.Label, Waypoint.Position)
 	print("DOOROPENER CALLED", Waypoint.Label, Waypoint.Action)
 	local npcName = NPC.Name
 
