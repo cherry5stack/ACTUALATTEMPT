@@ -98,7 +98,7 @@ local function tryOpenBlockingDoor(npc, target, data)
 		local actualOpenValue = nil
 		local doorInstance = nil
 
-		if openVal and openVal:IsA("BoolValue") then
+		if openVal and openVal:IsA("BoolValue") and openVal.Value == false then
 			actualOpenValue = openVal
 			doorInstance = inst
 		elseif doorScript then
@@ -257,7 +257,7 @@ local function setupEnemy(npc)
 		local lastDoorOpenAttempt = 0
 		-- How many consecutive path failures before we try the door raycast.
 		-- 3 is enough to avoid false-positives from momentary map jitter.
-		local DOOR_OPEN_FAIL_THRESHOLD = 3
+		local DOOR_OPEN_FAIL_THRESHOLD = 1
 		-- Cooldown so we don't hammer the door open logic every tick.
 		local DOOR_OPEN_COOLDOWN = 2
 
