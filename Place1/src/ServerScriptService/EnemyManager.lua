@@ -1,6 +1,6 @@
 local rs = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
-
+local busyNPCs = {}
 local VisionSystem     = require(rs.VisionSystem)
 local AI               = require(rs.Forbidden.AI)
 local EnemyData        = require(rs.EnemyData)
@@ -65,14 +65,21 @@ end
 -- Raycasts from NPC toward target and walks up the hit instance's ancestry
 -- looking for a door with an Open BoolValue. If found and closed, opens it.
 -- Returns true if a door was found and opened.
-local function tryOpenBlockingDoor(npc, target)
+-- Updated to check per-NPC per-door cooldown attributes
+-- Change the function arguments to accept 'data'
+local function tryOpenBlockingDoor(npc, target, data)
 	if not target or not target.Character then return false end
+
+	-- 1. STATE GATE: If this NPC is already busy interacting with a door, exit early
+	if busyNPCs[npc] then 
+		return true 
+	end
 
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
 	if not npcRoot or not targetRoot then return false end
 
-	local origin    = npcRoot.Position + Vector3.new(0, 1, 0) -- slight upward offset so we don't hit the floor
+	local origin    = npcRoot.Position + Vector3.new(0, 1, 0)
 	local direction = targetRoot.Position - origin
 
 	local params = RaycastParams.new()
@@ -82,32 +89,50 @@ local function tryOpenBlockingDoor(npc, target)
 	local result = workspace:Raycast(origin, direction, params)
 	if not result then return false end
 
-	-- Walk up ancestry up to 5 levels looking for a door Open value
 	local inst = result.Instance
 	for _ = 1, 5 do
 		if not inst then break end
 
-		-- Pattern 1: Open BoolValue directly on this instance
 		local openVal = inst:FindFirstChild("Open")
-		if openVal and openVal:IsA("BoolValue") and openVal.Value == false then
-			if DEBUG then
-				print(string.format("[%s] tryOpenBlockingDoor: opening door via direct Open on '%s'", npc.Name, inst:GetFullName()))
+		local doorScript = inst:FindFirstChild("Door")
+		local actualOpenValue = nil
+		local doorInstance = nil
+
+		if openVal and openVal:IsA("BoolValue") then
+			actualOpenValue = openVal
+			doorInstance = inst
+		elseif doorScript then
+			local openVal2 = doorScript:FindFirstChild("Open")
+			if openVal2 and openVal2:IsA("BoolValue") then
+				actualOpenValue = openVal2
+				doorInstance = inst
 			end
-			openVal.Value = true
-			return true
 		end
 
-		-- Pattern 2: Door script child containing Open (matches your DoorOpener structure)
-		local doorScript = inst:FindFirstChild("Door")
-		if doorScript then
-			local openVal2 = doorScript:FindFirstChild("Open")
-			if openVal2 and openVal2:IsA("BoolValue") and openVal2.Value == false then
-				if DEBUG then
-					print(string.format("[%s] tryOpenBlockingDoor: opening door via Door.Open on '%s'", npc.Name, inst:GetFullName()))
-				end
-				openVal2.Value = true
+		if actualOpenValue and doorInstance then
+			-- 2. CHECK IF ALREADY OPEN: If the door is open, just let the NPC walk through
+			if actualOpenValue.Value == true then
 				return true
 			end
+
+			-- 3. LOCK STATE: Mark NPC as busy so no other loops/frames re-trigger this code
+			busyNPCs[npc] = true
+
+			if DEBUG then
+				print(string.format("[%s] opening door '%s' and locking state.", npc.Name, doorInstance.Name))
+			end
+
+			-- 4. INTERACT: Change the value to open the door
+			actualOpenValue.Value = true
+
+			-- 5. BRAKE YIELD: Force a pause to allow the door animation to play, 
+			-- and give pathfinding time to route the NPC through without instant slamming
+			task.spawn(function()
+				task.wait(0.5) -- Matches DoorManager's 0.5-second reaction window[cite: 5]
+				busyNPCs[npc] = nil -- Release the state lock[cite: 5]
+			end)
+
+			return true
 		end
 
 		inst = inst.Parent
@@ -349,6 +374,7 @@ local function setupEnemy(npc)
 					VisionSystem.stopFacing(npc)
 				end
 
+				-- ... inside EnemyManager.lua main while loop ...
 				if los then
 					if not isAttacking then
 						AI.Stop(npc)
@@ -359,7 +385,7 @@ local function setupEnemy(npc)
 
 					rePathTimer = os.clock()
 					stuck.suppress()
-					pathFailCount[npc] = 0 -- in range and has LOS, path is clearly fine
+					pathFailCount[npc] = 0
 
 					if attackStandPos then
 						humanoid:MoveTo(attackStandPos)
@@ -367,17 +393,24 @@ local function setupEnemy(npc)
 
 					CombatManager.tryAttack(npc, currentTarget, data)
 				else
-					stuck.update(npc)
+					-- NEW: If they are actively crossing a door, suspend stuck checks completely
+					if npc:GetAttribute("CrossingDoor") then
+						stuck.suppress()
+						pathFailCount[npc] = 0
+					else
+						stuck.update(npc)
+					end
 
-					-- Check if we've been failing to path long enough that a door
-					-- is probably the culprit, and try to open it proactively.
+					-- Check if we've been failing to path long enough...
 					local failures = pathFailCount[npc] or 0
 					local now      = os.clock()
-					if failures >= DOOR_OPEN_FAIL_THRESHOLD
-						and now - lastDoorOpenAttempt >= DOOR_OPEN_COOLDOWN
-					then
-						lastDoorOpenAttempt = now
-						local opened = tryOpenBlockingDoor(npc, currentTarget)
+
+					if failures >= DOOR_OPEN_FAIL_THRESHOLD then
+						-- 🎯 Pass 'data' as the third argument here
+						local opened = tryOpenBlockingDoor(npc, currentTarget, data)
+						-- 🎯 Call tryOpenBlockingDoor directly. 
+						-- The function handles individual per-door cooldown attributes itself!
+						
 						if opened then
 							if DEBUG then
 								print(string.format("[%s] Proactively opened blocking door, repathing.", npc.Name))
