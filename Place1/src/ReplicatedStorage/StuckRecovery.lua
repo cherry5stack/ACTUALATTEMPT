@@ -106,6 +106,29 @@ return function()
 
 		return true
 	end
+	
+	function StuckRecovery.isTargetOnImpassableSurface(target, agentCosts)
+		if not target or not target.Character then return false end
+
+		local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+		if not targetRoot then return false end
+
+		local params = RaycastParams.new()
+		params.FilterDescendantsInstances = { target.Character }
+		params.FilterType = Enum.RaycastFilterType.Exclude
+
+		local result = workspace:Raycast(targetRoot.Position, Vector3.new(0, -5, 0), params)
+		if not result then return false end
+
+		local modifier = result.Instance:FindFirstChildOfClass("PathfindingModifier")
+		if not modifier then return false end
+
+		local label = modifier.Label
+		if not label or label == "" then return false end
+
+		local cost = agentCosts[label]
+		return cost == math.huge
+	end
 
 	function StuckRecovery.shouldEscalateToRepath()
 		return unstuckAttemptCount >= MAX_UNSTUCK_ATTEMPTS
