@@ -1,3 +1,4 @@
+-- CombatManager.lua
 local CombatManager = {}
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
@@ -14,7 +15,8 @@ local lastAttackTimes = {}
 local activeAnimations = {}
 local lastAttackEnd = {}
 local spawnTimes = {}
-local DEBUG = false
+local standingStill = {} -- [npc] = true while StandStillAfter is active
+local DEBUG = true
 
 local function drawHitbox(cframe, size, duration)
 	if not DEBUG then return end
@@ -86,7 +88,6 @@ local function spawnHitbox(npcRoot, npc, chosen, onFinished)
 
 		local connection
 		connection = RunService.Heartbeat:Connect(function(dt)
-			-- Kill hitbox if NPC died mid-swing
 			if not isNpcAlive(npc) then
 				connection:Disconnect()
 				if onFinished then onFinished() end
@@ -149,15 +150,16 @@ local function spawnHitbox(npcRoot, npc, chosen, onFinished)
 	end
 end
 
--- Records the moment an NPC is set up, used as the baseline for
--- attack.UnlockAfter checks. Call this once from EnemyManager.setupEnemy.
 function CombatManager.registerSpawnTime(npc)
 	spawnTimes[npc] = os.clock()
 end
 
+function CombatManager.isStandingStill(npc)
+	return standingStill[npc] == true
+end
+
 function CombatManager.tryAttack(npc, target, data)
 	if not isNpcAlive(npc) then return end
-
 	if PhaseManager.isTransitioning(npc) then return end
 
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
@@ -174,17 +176,12 @@ function CombatManager.tryAttack(npc, target, data)
 	if not lastAttackTimes[npc] then lastAttackTimes[npc] = {} end
 
 	local timeAlive = os.clock() - (spawnTimes[npc] or os.clock())
-
 	local dist = (npcRoot.Position - targetRoot.Position).Magnitude
 
 	local validAttacks = {}
 	for _, attack in ipairs(data.Attacks) do
 		if not attack then continue end
-
-		-- Skip attacks that haven't unlocked yet for this NPC
 		if attack.UnlockAfter and timeAlive < attack.UnlockAfter then continue end
-
-		-- Skip attacks that require a phase this NPC hasn't reached yet
 		if attack.RequiresPhase and PhaseManager.getCurrentPhase(npc) < attack.RequiresPhase then continue end
 
 		local lastTime = lastAttackTimes[npc][attack.Name] or 0
@@ -238,6 +235,12 @@ function CombatManager.tryAttack(npc, target, data)
 
 	local function tryRelease()
 		if animDone and hitboxDone then
+			if DEBUG then
+				print(string.format(
+					"[%s] Attack '%s' complete — releasing immediately.",
+					npc.Name, chosen.Name
+					))
+			end
 			activeAnimations[npc] = false
 			lastAttackEnd[npc] = os.clock()
 			lastAttackTimes[npc][chosen.Name] = os.clock()
@@ -254,17 +257,46 @@ function CombatManager.tryAttack(npc, target, data)
 
 	SoundManager.play(chosen.Sounds and chosen.Sounds.Swing, npcRoot.Position)
 
-	-- Telegraph: cosmetic highlight that plays alongside the swing.
-	-- Hitbox spawn timing is driven purely by the Hit marker below;
-	-- Telegraph.Duration does not gate or delay the hitbox.
 	local telegraph = chosen.Telegraph
 	if telegraph and telegraph.Enabled then
 		TelegraphManager.play(npc, telegraph, function() end)
 	end
 
-	-- Cast appearance: tints the NPC's body color while the attack winds up.
 	if castAppearance and castAppearance.Enabled then
 		AppearanceManager.tintModel(npc, castAppearance.Color, castAppearance.FadeInTime)
+	end
+
+	-- START StandStillAfter at cast time, not after animation ends.
+	-- This freezes movement for the duration starting from when the attack begins.
+	-- The NPC is free to attack again once debounce/cooldown allows,
+	-- but will not move until StandStillAfter expires.
+	if chosen.StandStillAfter and chosen.StandStillAfter > 0 then
+		standingStill[npc] = true
+		if DEBUG then
+			print(string.format(
+				"[%s] Attack '%s' cast — standing still for %.2fs from now.",
+				npc.Name, chosen.Name, chosen.StandStillAfter
+				))
+		end
+		task.delay(chosen.StandStillAfter, function()
+			if not isNpcAlive(npc) then
+				if DEBUG then
+					print(string.format(
+						"[%s] StandStillAfter expired but NPC is dead — skipping release.",
+						npc.Name
+						))
+				end
+				standingStill[npc] = nil
+				return
+			end
+			standingStill[npc] = nil
+			if DEBUG then
+				print(string.format(
+					"[%s] StandStillAfter %.2fs elapsed — free to move again.",
+					npc.Name, chosen.StandStillAfter
+					))
+			end
+		end)
 	end
 
 	track:Play(nil, nil, chosen.AttackSpeed or 1)
@@ -286,6 +318,7 @@ function CombatManager.cleanup(npc)
 	TelegraphManager.cancel(npc)
 	AppearanceManager.cleanup(npc)
 	PhaseManager.cleanup(npc)
+	standingStill[npc] = nil
 	lastAttackTimes[npc] = nil
 	activeAnimations[npc] = nil
 	lastAttackEnd[npc] = nil
