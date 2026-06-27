@@ -6,9 +6,9 @@ local RESPONSIVENESS = 2500 -- higher = snappier turning, tune by feel (try 5-12
 -- ─────────────────────────────────────────────
 -- DEBUG CONFIG
 -- ─────────────────────────────────────────────
-local DEBUG              = true
+local DEBUG              = false
 local DEBUG_RAY_LIFETIME = 0.15
-local DEBUG_PRINT_LOS    = true
+local DEBUG_PRINT_LOS    = false
 
 -- ─────────────────────────────────────────────
 -- Internal helpers
