@@ -99,7 +99,7 @@ EnemyData["Fighter"] = {
 	AgentHeight    = 5,
 	AttackDistance = 5,
 	FaceTargetRange  = 40,
-
+	DoorCooldown   = 2,
 	Wander = {
 		Enabled           = true,
 		BreaksDoors       = false,
