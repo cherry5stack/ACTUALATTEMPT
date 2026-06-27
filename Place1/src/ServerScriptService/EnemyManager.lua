@@ -1,3 +1,4 @@
+-- EnemyManager.lua
 local rs = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local busyNPCs = {}
@@ -22,9 +23,7 @@ local DEBUG_PRINT_FACE   = true
 
 local REPATH_INTERVAL    = 0.5
 local lastFootstep       = {}
-
--- Tracks consecutive path failures per NPC so we know when to try door opening
-local pathFailCount = {}
+local pathFailCount      = {}
 
 local function debugGroundCheck(npc, agentCosts)
 	if not DEBUG_PRINT_GROUND then return end
@@ -62,18 +61,10 @@ local function debugGroundCheck(npc, agentCosts)
 	end
 end
 
--- Raycasts from NPC toward target and walks up the hit instance's ancestry
--- looking for a door with an Open BoolValue. If found and closed, opens it.
--- Returns true if a door was found and opened.
--- Updated to check per-NPC per-door cooldown attributes
--- Change the function arguments to accept 'data'
 local function tryOpenBlockingDoor(npc, target, data)
 	if not target or not target.Character then return false end
 
-	-- 1. STATE GATE: If this NPC is already busy interacting with a door, exit early
-	if busyNPCs[npc] then 
-		return true 
-	end
+	if busyNPCs[npc] then return true end
 
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
@@ -110,26 +101,21 @@ local function tryOpenBlockingDoor(npc, target, data)
 		end
 
 		if actualOpenValue and doorInstance then
-			-- 2. CHECK IF ALREADY OPEN: If the door is open, just let the NPC walk through
 			if actualOpenValue.Value == true then
 				return true
 			end
 
-			-- 3. LOCK STATE: Mark NPC as busy so no other loops/frames re-trigger this code
 			busyNPCs[npc] = true
 
 			if DEBUG then
 				print(string.format("[%s] opening door '%s' and locking state.", npc.Name, doorInstance.Name))
 			end
 
-			-- 4. INTERACT: Change the value to open the door
 			actualOpenValue.Value = true
 
-			-- 5. BRAKE YIELD: Force a pause to allow the door animation to play, 
-			-- and give pathfinding time to route the NPC through without instant slamming
 			task.spawn(function()
-				task.wait(0.5) -- Matches DoorManager's 0.5-second reaction window[cite: 5]
-				busyNPCs[npc] = nil -- Release the state lock[cite: 5]
+				task.wait(0.5)
+				busyNPCs[npc] = nil
 			end)
 
 			return true
@@ -178,10 +164,7 @@ local function setupEnemy(npc)
 		config.Hooks.PathfindingLinkReached = DoorOpener.onPathfindingLinkReached
 		config.Hooks.PathingFailed = function(npc, reason)
 			defaultPathingFailed(npc, reason)
-
-			-- Count consecutive failures so the door opener knows when to kick in
 			pathFailCount[npc] = (pathFailCount[npc] or 0) + 1
-
 			task.delay(0.6, function()
 				if currentTarget and humanoid.Health > 0 then
 					AI.SmartPathfind(npc, currentTarget)
@@ -255,10 +238,7 @@ local function setupEnemy(npc)
 		local SWAP_DELAY         = 1
 		local pursuitActiveUntil = 0
 		local lastDoorOpenAttempt = 0
-		-- How many consecutive path failures before we try the door raycast.
-		-- 3 is enough to avoid false-positives from momentary map jitter.
 		local DOOR_OPEN_FAIL_THRESHOLD = 1
-		-- Cooldown so we don't hammer the door open logic every tick.
 		local DOOR_OPEN_COOLDOWN = 2
 
 		local stuck = StuckRecovery()
@@ -316,7 +296,7 @@ local function setupEnemy(npc)
 					rePathTimer   = 0
 					resetAttackState()
 					stuck.reset(npc)
-					pathFailCount[npc] = 0 -- reset failure counter on target change
+					pathFailCount[npc] = 0
 
 					if currentTarget then
 						if wander and wander.isWandering() then
@@ -325,13 +305,11 @@ local function setupEnemy(npc)
 						if wander then wander.cleanupBodyGyro(npc) end
 						applyCombatConfig(currentTarget)
 						AI.SmartPathfind(npc, currentTarget)
-
 						pursuitActiveUntil = os.clock() + (data.PursueLingerTime or 0)
 					else
 						AI.Stop(npc)
 						VisionSystem.stopFacing(npc)
 						humanoid.AutoRotate = true
-
 						if hadTarget then
 							lastCombatEndTime = os.clock()
 						end
@@ -374,7 +352,6 @@ local function setupEnemy(npc)
 					VisionSystem.stopFacing(npc)
 				end
 
-				-- ... inside EnemyManager.lua main while loop ...
 				if los then
 					if not isAttacking then
 						AI.Stop(npc)
@@ -392,56 +369,76 @@ local function setupEnemy(npc)
 					end
 
 					CombatManager.tryAttack(npc, currentTarget, data)
+
 				else
-					-- NEW: If they are actively crossing a door, suspend stuck checks completely
-					if npc:GetAttribute("CrossingDoor") then
+					-- StandStillAfter: NPC just cast an attack and is frozen in place.
+					-- Suppress all movement and stuck checks for the duration.
+					-- The NPC can still attack again once debounce/cooldown allows
+					-- IF the player comes back into range — but it will not chase.
+					if CombatManager.isStandingStill(npc) then
 						stuck.suppress()
-						pathFailCount[npc] = 0
+						AI.Stop(npc)
+						if DEBUG then
+							print(string.format(
+								"[%s] StandStillAfter active — suppressing movement.",
+								npc.Name
+								))
+						end
 					else
-						stuck.update(npc)
-					end
-
-					-- Check if we've been failing to path long enough...
-					local failures = pathFailCount[npc] or 0
-					local now      = os.clock()
-
-					if failures >= DOOR_OPEN_FAIL_THRESHOLD then
-						-- 🎯 Pass 'data' as the third argument here
-						local opened = tryOpenBlockingDoor(npc, currentTarget, data)
-						-- 🎯 Call tryOpenBlockingDoor directly. 
-						-- The function handles individual per-door cooldown attributes itself!
-						
-						if opened then
-							if DEBUG then
-								print(string.format("[%s] Proactively opened blocking door, repathing.", npc.Name))
-							end
+						if npc:GetAttribute("CrossingDoor") then
+							stuck.suppress()
 							pathFailCount[npc] = 0
-							-- Give the door a moment to physically open before repathing
-							task.delay(0.5, function()
-								if currentTarget and humanoid.Health > 0 then
-									AI.Stop(npc)
-									AI.SmartPathfind(npc, currentTarget)
-									rePathTimer = os.clock()
-								end
-							end)
-						end
-					end
-
-					if not isAttacking and stuck.isStuck() then
-						if stuck.shouldEscalateToRepath() then
-							stuck.resetUnstuckAttempts()
-							forceRepath()
 						else
-							stuck.attemptUnstuck(npc, currentTarget, AI)
+							stuck.update(npc)
 						end
-					else
-						local shouldRepath = isAttacking
-							or (now - rePathTimer >= REPATH_INTERVAL)
 
-						if shouldRepath then
-							resetAttackState()
-							rePathTimer = now
-							AI.SmartPathfind(npc, currentTarget)
+						local failures = pathFailCount[npc] or 0
+						local now      = os.clock()
+
+						if failures >= DOOR_OPEN_FAIL_THRESHOLD then
+							local opened = tryOpenBlockingDoor(npc, currentTarget, data)
+							if opened then
+								if DEBUG then
+									print(string.format("[%s] Proactively opened blocking door, repathing.", npc.Name))
+								end
+								pathFailCount[npc] = 0
+								task.delay(0.5, function()
+									if currentTarget and humanoid.Health > 0 then
+										AI.Stop(npc)
+										AI.SmartPathfind(npc, currentTarget)
+										rePathTimer = os.clock()
+									end
+								end)
+							end
+						end
+
+						local targetOnImpassable = stuck.isTargetOnImpassableSurface(currentTarget, config.AgentInfo.Costs)
+
+						if not isAttacking and stuck.isStuck() then
+							if targetOnImpassable then
+								stuck.suppress()
+								if DEBUG then
+									print(string.format(
+										"[%s] Target is on impassable surface — suppressing stuck recovery.",
+										npc.Name
+										))
+								end
+							elseif stuck.shouldEscalateToRepath() then
+								stuck.resetUnstuckAttempts()
+								forceRepath()
+							else
+								stuck.attemptUnstuck(npc, currentTarget, AI)
+							end
+						else
+							local now = os.clock()
+							local shouldRepath = isAttacking
+								or (now - rePathTimer >= REPATH_INTERVAL)
+
+							if shouldRepath then
+								resetAttackState()
+								rePathTimer = now
+								AI.SmartPathfind(npc, currentTarget)
+							end
 						end
 					end
 				end
@@ -459,6 +456,8 @@ local function setupEnemy(npc)
 			if wander then wander.stopWandering(npc, AI) end
 			CombatManager.cleanup(npc)
 			VisionSystem.stopFacing(npc)
+			pathFailCount[npc] = nil
+			lastFootstep[npc] = nil
 		end
 	end)
 end
