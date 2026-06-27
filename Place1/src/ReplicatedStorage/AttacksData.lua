@@ -137,6 +137,7 @@ AttacksData["HeavySlam"] = {
 	HitboxDuration = 3,
 	StaticHitbox = true,
 	AttackSpeed = 0.5,
+	StandStillAfter = 10, 
 	Sounds = {
 		Swing = "PunchSwing",
 		Hit   = "PunchHit",
