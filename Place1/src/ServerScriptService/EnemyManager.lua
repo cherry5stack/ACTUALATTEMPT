@@ -108,10 +108,16 @@ local function tryOpenBlockingDoor(npc, target, data)
 			busyNPCs[npc] = true
 
 			if DEBUG then
-				print(string.format("[%s] opening door '%s' and locking state.", npc.Name, doorInstance.Name))
+				print(string.format("[%s] opening door '%s' via secure toggle.", npc.Name, doorInstance.Name))
 			end
 
-			actualOpenValue.Value = true
+			-- Use secure toggle if available, fall back to direct set
+			local secureToggle = _G["SecureToggleDoor_" .. doorInstance:GetFullName()]
+			if secureToggle then
+				secureToggle(true)
+			else
+				actualOpenValue.Value = true
+			end
 
 			task.spawn(function()
 				task.wait(0.5)
