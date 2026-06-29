@@ -1,618 +1,478 @@
-return function()
-	local SmartWander = {}
-	local rs = game:GetService("ReplicatedStorage")
-	local DoorOpener = require(rs.DoorOpener)
-	local isWandering      = false
-	local wanderGeneration  = 0
-	local wanderCoroutine   = nil
-	local lastWanderCheck   = os.clock()
-	local wanderPathFailCount = 0
-	local lastWanderDoorAttempt = 0
-	local WANDER_DOOR_COOLDOWN = 2
+-- EnemyManager.lua
+local rs = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local busyNPCs = {}
+local VisionSystem     = require(rs.VisionSystem)
+local AI               = require(rs.Forbidden.AI)
+local EnemyData        = require(rs.EnemyData)
+local TargetingManager = require(rs.TargetingManager)
+local DistanceManager  = require(rs.DistanceManager)
+local CombatManager    = require(rs.CombatManager)
+local StuckRecovery    = require(rs.StuckRecovery)
+local SoundManager     = require(rs.SoundManager)
+local SmartWanderCtor  = require(rs.SmartWander)
+local PhaseManager     = require(rs.PhaseManager)
+local DoorOpener       = require(rs.DoorOpener)
 
-	local defaultSettings = {
-		WANDER_CHECK_INTERVAL = 3,
-		DoorsFolder           = workspace:FindFirstChild("Doors"),
-		BreaksDoors           = false,
-		MinWanderWait         = 4,
-		MaxWanderWait         = 10,
-		MinWanderDistance     = 10,
-		MaxWanderDistance     = 25,
-		debugPrint            = function(...) print("[Wander]", ...) end,
-	}
+local enemiesFolder = workspace:WaitForChild("Enemies")
 
-	function SmartWander.faceRandomDirection(enemyChar)
-		local humanoid = enemyChar:FindFirstChild("Humanoid")
-		local hrp      = enemyChar:FindFirstChild("HumanoidRootPart")
-		if not humanoid or not hrp then return end
+local DEBUG              = true
+local DEBUG_PRINT_DIST   = true
+local DEBUG_PRINT_GROUND = true
+local DEBUG_PRINT_FACE   = true
 
-		SmartWander.cleanupBodyGyro(enemyChar)
+local REPATH_INTERVAL    = 0.5
+local lastFootstep       = {}
+local pathFailCount      = {}
 
-		local randomAngle = math.random() * math.pi * 2
-		local lookVector  = Vector3.new(math.cos(randomAngle), 0, math.sin(randomAngle))
+local function debugGroundCheck(npc, agentCosts)
+	if not DEBUG_PRINT_GROUND then return end
 
-		local bodyGyro      = Instance.new("BodyGyro")
-		bodyGyro.Name       = "WanderBodyGyro"
-		bodyGyro.MaxTorque  = Vector3.new(4000, 4000, 4000)
-		bodyGyro.P          = 1000
-		bodyGyro.D          = 50
-		bodyGyro.CFrame     = CFrame.new(hrp.Position, hrp.Position + lookVector)
-		bodyGyro.Parent     = hrp
+	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
+	if not npcRoot then return end
 
-		return bodyGyro, randomAngle
-	end
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = { npc }
+	params.FilterType = Enum.RaycastFilterType.Exclude
 
-	function SmartWander.cleanupBodyGyro(enemyChar)
-		if not enemyChar then return end
-		local hrp = enemyChar:FindFirstChild("HumanoidRootPart")
-		if hrp then
-			local bodyGyro = hrp:FindFirstChild("WanderBodyGyro")
-			if bodyGyro then bodyGyro:Destroy() end
-		end
-	end
+	local result = workspace:Raycast(npcRoot.Position, Vector3.new(0, -5, 0), params)
+	if not result then return end
 
-	-- Raycasts toward the wander target and proactively opens a blocking
-	-- door via the secure toggle — the single authoritative setter.
-	local function tryOpenDoorTowardWanderTarget(enemyChar, targetPos, settings)
-		local hrp = enemyChar:FindFirstChild("HumanoidRootPart")
-		if not hrp then return false end
+	local part     = result.Instance
+	local modifier = part:FindFirstChildOfClass("PathfindingModifier")
 
-		local now = os.clock()
-		if now - lastWanderDoorAttempt < WANDER_DOOR_COOLDOWN then return false end
-
-		local origin    = hrp.Position + Vector3.new(0, 1, 0)
-		local direction = targetPos - origin
-
-		local params = RaycastParams.new()
-		params.FilterDescendantsInstances = { enemyChar }
-		params.FilterType = Enum.RaycastFilterType.Exclude
-
-		local result = workspace:Raycast(origin, direction, params)
-		if not result then return false end
-
-		-- Only consider geometry close to the NPC — a blocking door
-		-- should be nearby, not across the map
-		local hitDist = (result.Position - hrp.Position).Magnitude
-		if hitDist > 8 then
-			if settings.debugPrint then
-				settings.debugPrint(string.format(
-					"[%s] Wander raycast hit '%s' at %.1f studs — too far to be a blocking door.",
-					enemyChar.Name, result.Instance:GetFullName(), hitDist
+	if modifier then
+		local label = modifier.Label
+		local cost  = agentCosts[label]
+		if label and label ~= "" then
+			if cost then
+				print(string.format(
+					"[%s] STANDING ON labelled part '%s' | Label='%s' | Cost=%s",
+					npc.Name, part.Name, label,
+					cost == math.huge and "math.huge (impassable)" or tostring(cost)
 					))
-			end
-			return false
-		end
-
-		if settings.debugPrint then
-			settings.debugPrint(string.format(
-				"[%s] Wander raycast hit '%s' at %.1f studs — checking ancestry for door.",
-				enemyChar.Name, result.Instance:GetFullName(), hitDist
-				))
-		end
-
-		-- Walk up ancestry, stop before Workspace
-		local inst = result.Instance
-		local depth = 0
-		while inst and inst ~= workspace and depth < 5 do
-			depth += 1
-
-			-- Pattern 1: Open BoolValue directly, name must suggest door
-			local openVal = inst:FindFirstChild("Open")
-			if openVal and openVal:IsA("BoolValue") and openVal.Value == false then
-				local nameToCheck = string.lower(inst.Name .. (inst.Parent and inst.Parent.Name or ""))
-				if string.find(nameToCheck, "door") then
-					lastWanderDoorAttempt = now
-					local secureToggle = _G["SecureToggleDoor_" .. inst:GetFullName()]
-					if secureToggle then
-						secureToggle(true)
-					else
-						openVal.Value = true
-					end
-					if settings.debugPrint then
-						settings.debugPrint(string.format(
-							"[%s] Wander opened door (direct Open) on '%s'.",
-							enemyChar.Name, inst:GetFullName()
-							))
-					end
-					return true
-				end
-			end
-
-			-- Pattern 2: Door script child containing Open
-			local doorScript = inst:FindFirstChild("Door")
-			if doorScript then
-				local openVal2 = doorScript:FindFirstChild("Open")
-				if openVal2 and openVal2:IsA("BoolValue") and openVal2.Value == false then
-					lastWanderDoorAttempt = now
-					local secureToggle = _G["SecureToggleDoor_" .. inst:GetFullName()]
-					if secureToggle then
-						secureToggle(true)
-					else
-						openVal2.Value = true
-					end
-					if settings.debugPrint then
-						settings.debugPrint(string.format(
-							"[%s] Wander opened door (Door.Open) on '%s'.",
-							enemyChar.Name, inst:GetFullName()
-							))
-					end
-					return true
-				end
-			end
-
-			inst = inst.Parent
-		end
-
-		if settings.debugPrint then
-			settings.debugPrint(string.format(
-				"[%s] Wander: no door found in ancestry of hit part.",
-				enemyChar.Name
-				))
-		end
-		return false
-	end
-
-	function SmartWander.findValidWanderPosition(enemyChar, ai, maxAttempts, options, settings)
-		local enemyHRT = enemyChar:FindFirstChild("HumanoidRootPart")
-		if not enemyHRT then return nil end
-
-		local config = ai.GetConfig(enemyChar)
-		local startPosition = enemyHRT.Position
-		local isDoorBreaker  = settings and settings.BreaksDoors
-
-		local opts              = options or {}
-		local biasAngle         = opts.biasAngle
-		local biasSpread        = opts.biasSpread or math.pi / 2
-		local minDist           = opts.minDist    or (settings and settings.MinWanderDistance) or 10
-		local maxDist           = opts.maxDist    or (settings and settings.MaxWanderDistance) or 25
-		local avoidPositions    = opts.avoidPositions or {}
-		local avoidRadius       = opts.avoidRadius    or 0
-		local avoidDoorsInPath  = opts.avoidDoorsInPath or false
-
-		local floorParams = RaycastParams.new()
-		floorParams.FilterType = Enum.RaycastFilterType.Exclude
-		floorParams.FilterDescendantsInstances = {enemyChar}
-
-		local pathParams = RaycastParams.new()
-		pathParams.FilterType = Enum.RaycastFilterType.Exclude
-		pathParams.FilterDescendantsInstances = {enemyChar}
-
-		local attemptsLog = {}
-
-		for attempt = 1, (maxAttempts or 10) do
-			local angle
-			if biasAngle ~= nil then
-				angle = biasAngle + (math.random() - 0.5) * 2 * biasSpread
 			else
-				angle = math.random() * math.pi * 2
-			end
-
-			local distance  = minDist + math.random() * (maxDist - minDist)
-			local candidate = startPosition + Vector3.new(
-				math.cos(angle) * distance, 0, math.sin(angle) * distance
-			)
-
-			local floorResult = workspace:Raycast(
-				candidate + Vector3.new(0, 10, 0),
-				Vector3.new(0, -20, 0),
-				floorParams
-			)
-
-			if not floorResult then
-				table.insert(attemptsLog, string.format("  Attempt %d: no floor found", attempt))
-				continue
-			end
-
-			local material   = floorResult.Material
-			local isWalkable = material ~= Enum.Material.Water and material ~= Enum.Material.Ice
-
-			if not isWalkable then
-				table.insert(attemptsLog, string.format(
-					"  Attempt %d: unwalkable material (%s)", attempt, tostring(material)
+				print(string.format(
+					"[%s] STANDING ON labelled part '%s' | Label='%s' | Cost=NOT IN AGENT COSTS (treated as 1)",
+					npc.Name, part.Name, label
 					))
+			end
+		end
+	end
+end
+
+local function tryOpenBlockingDoor(npc, target, data)
+	if not target or not target.Character then return false end
+
+	if busyNPCs[npc] then return true end
+
+	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
+	local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+	if not npcRoot or not targetRoot then return false end
+
+	local origin    = npcRoot.Position + Vector3.new(0, 1, 0)
+	local direction = targetRoot.Position - origin
+
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = { npc, target.Character }
+	params.FilterType = Enum.RaycastFilterType.Exclude
+
+	local result = workspace:Raycast(origin, direction, params)
+	if not result then return false end
+
+	local inst = result.Instance
+	for _ = 1, 5 do
+		if not inst then break end
+
+		local openVal = inst:FindFirstChild("Open")
+		local doorScript = inst:FindFirstChild("Door")
+		local actualOpenValue = nil
+		local doorInstance = nil
+
+		if openVal and openVal:IsA("BoolValue") and openVal.Value == false then
+			actualOpenValue = openVal
+			doorInstance = inst
+		elseif doorScript then
+			local openVal2 = doorScript:FindFirstChild("Open")
+			if openVal2 and openVal2:IsA("BoolValue") then
+				actualOpenValue = openVal2
+				doorInstance = inst
+			end
+		end
+
+		if actualOpenValue and doorInstance then
+			if actualOpenValue.Value == true then
+				return true
+			end
+
+			busyNPCs[npc] = true
+
+			if DEBUG then
+				print(string.format("[%s] opening door '%s' via secure toggle.", npc.Name, doorInstance.Name))
+			end
+
+			-- Use secure toggle if available, fall back to direct set
+			local secureToggle = _G["SecureToggleDoor_" .. doorInstance:GetFullName()]
+			if secureToggle then
+				secureToggle(true)
+			else
+				actualOpenValue.Value = true
+			end
+
+			task.spawn(function()
+				task.wait(0.5)
+				busyNPCs[npc] = nil
+			end)
+
+			return true
+		end
+
+		inst = inst.Parent
+	end
+
+	return false
+end
+
+local function setupEnemy(npc)
+	local humanoid = npc:FindFirstChildOfClass("Humanoid")
+	local enemyTypeValue = npc:FindFirstChild("EnemyType")
+
+	if not humanoid or not enemyTypeValue then
+		warn("Enemy " .. npc.Name .. " is missing Humanoid or EnemyType")
+		return
+	end
+
+	local data = EnemyData[enemyTypeValue.Value]
+	if not data then
+		warn("No data found for enemy type: " .. enemyTypeValue.Value)
+		return
+	end
+
+	CombatManager.registerSpawnTime(npc)
+	PhaseManager.registerPhases(npc, data.PhaseTransitions, data.PhaseCooldown)
+
+	humanoid.MaxHealth = data.Health
+	humanoid.Health    = data.Health
+	humanoid.WalkSpeed = data.WalkSpeed
+
+	local config = AI.GetConfig(npc)
+
+	local function defaultPathingFailed(npc, reason)
+		if DEBUG then
+			print(string.format("[%s] Pathing failed — %s", npc.Name, reason))
+		end
+	end
+
+	local function applyCombatConfig(currentTarget)
+		config.Tracking.Enabled = true
+		config.DirectMoveTo.Enabled = false
+		config.Hooks.GoalReached = nil
+		config.Hooks.PathfindingLinkReached = DoorOpener.onPathfindingLinkReached
+		config.Hooks.PathingFailed = function(npc, reason)
+			defaultPathingFailed(npc, reason)
+			pathFailCount[npc] = (pathFailCount[npc] or 0) + 1
+			task.delay(0.6, function()
+				if currentTarget and humanoid.Health > 0 then
+					AI.SmartPathfind(npc, currentTarget)
+				end
+			end)
+		end
+	end
+
+	config.Tracking.Enabled                       = true
+	config.Tracking.CollinearTargetPositionOffset  = 0
+	config.AgentInfo.AgentRadius                  = data.AgentRadius
+	config.AgentInfo.AgentHeight                  = data.AgentHeight
+	config.AgentInfo.Costs                        = data.AgentCosts or { Obstacle = math.huge }
+	config.DirectMoveTo.Enabled                   = false
+	config.Hooks.PathingFailed                    = defaultPathingFailed
+
+	AI.InsertAntiLag(npc)
+
+	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
+	if npcRoot then
+		SoundManager.play(data.Sounds and data.Sounds.Spawn, npcRoot.Position)
+	end
+
+	local wander = nil
+	local lastCombatEndTime = 0
+
+	if data.Wander and data.Wander.Enabled then
+		wander = SmartWanderCtor()
+		wander.updateSettings({
+			BreaksDoors       = data.Wander.BreaksDoors or false,
+			MinWanderWait     = data.Wander.MinWanderWait or 4,
+			MaxWanderWait     = data.Wander.MaxWanderWait or 10,
+			MinWanderDistance = data.Wander.MinWanderDistance or 10,
+			MaxWanderDistance = data.Wander.MaxWanderDistance or 25,
+		})
+	end
+
+	humanoid.Died:Connect(function()
+		humanoid.AutoRotate = true
+		local root = npc:FindFirstChild("HumanoidRootPart")
+		if root then
+			SoundManager.play(data.Sounds and data.Sounds.Death, root.Position)
+		end
+		lastFootstep[npc] = nil
+		pathFailCount[npc] = nil
+		if wander then wander.stopWandering(npc, AI) end
+		AI.Stop(npc)
+		CombatManager.cleanup(npc)
+		VisionSystem.stopFacing(npc)
+	end)
+
+	humanoid.Running:Connect(function(speed)
+		if speed <= 0 then return end
+		if humanoid.Health <= 0 then return end
+		local root = npc:FindFirstChild("HumanoidRootPart")
+		if not root then return end
+		local footstepInterval = 0.7 / (humanoid.WalkSpeed / 16)
+		local now = os.clock()
+		if now - (lastFootstep[npc] or 0) >= footstepInterval then
+			lastFootstep[npc] = now
+			SoundManager.play(data.Sounds and data.Sounds.Footstep, root.Position)
+		end
+	end)
+
+	task.spawn(function()
+		local currentTarget      = nil
+		local isAttacking        = false
+		local attackStandPos     = nil
+		local swapTimer          = 0
+		local rePathTimer        = 0
+		local SWAP_DELAY         = 1
+		local pursuitActiveUntil = 0
+		local lastDoorOpenAttempt = 0
+		local DOOR_OPEN_FAIL_THRESHOLD = 1
+		local DOOR_OPEN_COOLDOWN = 2
+
+		local stuck = StuckRecovery()
+
+		local function resetAttackState()
+			isAttacking    = false
+			attackStandPos = nil
+		end
+
+		local function forceRepath()
+			AI.Stop(npc)
+			task.wait()
+			if currentTarget and humanoid.Health > 0 then
+				AI.SmartPathfind(npc, currentTarget)
+				rePathTimer = os.clock()
+			end
+			stuck.reset(npc)
+		end
+
+		while #Players:GetPlayers() == 0 do task.wait(1) end
+		task.wait(2)
+
+		stuck.reset(npc)
+
+		while npc.Parent ~= nil and humanoid.Health > 0 do
+			task.wait(0.1)
+
+			if humanoid.Health <= 0 then break end
+
+			if not npc:FindFirstChild("HumanoidRootPart") then
+				break
+			end
+
+			debugGroundCheck(npc, config.AgentInfo.Costs)
+
+			PhaseManager.update(npc, humanoid, AI)
+
+			if PhaseManager.isTransitioning(npc) then
+				stuck.suppress()
 				continue
 			end
 
-			local finalPos = floorResult.Position + Vector3.new(0, 3, 0)
+			local inPursuitWindow   = os.clock() < pursuitActiveUntil
+			local searchRange       = inPursuitWindow and (data.PursueRange or data.DetectionRange) or data.DetectionRange
+			local searchHeightLimit = inPursuitWindow and (data.PursueHeightLimit or data.DetectionHeightLimit) or data.DetectionHeightLimit
 
-			if avoidRadius > 0 then
-				local tooClose = false
-				for _, avoidPos in ipairs(avoidPositions) do
-					if (finalPos - avoidPos).Magnitude < avoidRadius then
-						tooClose = true; break
-					end
-				end
-				if tooClose then
-					table.insert(attemptsLog, string.format("  Attempt %d: too close to avoid position", attempt))
-					continue
-				end
-			end
+			local newTarget = TargetingManager.getTarget(npc, data, searchRange, searchHeightLimit)
 
-			if avoidDoorsInPath and settings and settings.DoorsFolder then
-				local pfs  = game:GetService("PathfindingService")
-				local path = pfs:CreatePath({ AgentRadius = 2.5, AgentCanJump = true })
-				local ok   = pcall(function() path:ComputeAsync(startPosition, finalPos) end)
-				if not ok or path.Status ~= Enum.PathStatus.Success then
-					table.insert(attemptsLog, string.format("  Attempt %d: path failed (avoidDoorsInPath)", attempt))
-					continue
-				end
-				local hasDoor = false
-				for _, wp in ipairs(path:GetWaypoints()) do
-					if wp.Label and string.find(wp.Label:lower(), "door") then
-						local door       = settings.DoorsFolder:FindFirstChild(wp.Label)
-						local doorScript = door and door:FindFirstChild("Door")
-						local openVal    = doorScript and doorScript:FindFirstChild("Open")
-						if openVal and openVal.Value == false then
-							hasDoor = true; break
+			if newTarget ~= currentTarget then
+				if newTarget == nil or os.clock() - swapTimer >= SWAP_DELAY then
+					local hadTarget = currentTarget ~= nil
+
+					currentTarget = newTarget
+					swapTimer     = os.clock()
+					rePathTimer   = 0
+					resetAttackState()
+					stuck.reset(npc)
+					pathFailCount[npc] = 0
+
+					if currentTarget then
+						if wander and wander.isWandering() then
+							wander.stopWandering(npc, AI)
 						end
-					end
-				end
-				if hasDoor then
-					table.insert(attemptsLog, string.format("  Attempt %d: path through closed door", attempt))
-					continue
-				end
-			elseif isDoorBreaker and settings and settings.DoorsFolder then
-				local pathResult = workspace:Raycast(startPosition, finalPos - startPosition, pathParams)
-				if pathResult and pathResult.Instance then
-					local isDoor = pathResult.Instance:IsDescendantOf(settings.DoorsFolder)
-						or string.find(pathResult.Instance.Name, "Door")
-					if isDoor then
-						local doorModel = pathResult.Instance:FindFirstAncestor("Door") or pathResult.Instance.Parent
-						local openValue  = doorModel and doorModel:FindFirstChild("Open", true)
-						if openValue and openValue.Value == false then
-							table.insert(attemptsLog, string.format("  Attempt %d: closed door in way (breaker)", attempt))
-							continue
+						if wander then wander.cleanupBodyGyro(npc) end
+						applyCombatConfig(currentTarget)
+						AI.SmartPathfind(npc, currentTarget)
+						pursuitActiveUntil = os.clock() + (data.PursueLingerTime or 0)
+					else
+						AI.Stop(npc)
+						VisionSystem.stopFacing(npc)
+						humanoid.AutoRotate = true
+						if hadTarget then
+							lastCombatEndTime = os.clock()
 						end
 					end
 				end
 			end
 
-			-- Pre-verify using the NPC's actual agent settings so door
-			-- modifiers and PathfindingLinks are respected correctly
-			-- Replace the entire pre-verify block with this:
-			local pfs = game:GetService("PathfindingService")
-			local verifyPath = pfs:CreatePath({
-				AgentRadius  = config.AgentInfo.AgentRadius,
-				AgentHeight  = config.AgentInfo.AgentHeight,
-				AgentCanJump = config.AgentInfo.AgentCanJump,
-				Costs        = config.AgentInfo.Costs,
-			})
-			local ok = pcall(function() verifyPath:ComputeAsync(startPosition, finalPos) end)
-			if not ok or verifyPath.Status ~= Enum.PathStatus.Success then
-				-- Check if any tagged door lies between the NPC and the candidate
-				local CollectionService = game:GetService("CollectionService")
-				local hrp = enemyChar:FindFirstChild("HumanoidRootPart")
-				local blockedByDoor = false
+			if currentTarget then
+				pursuitActiveUntil = os.clock() + (data.PursueLingerTime or 0)
 
-				if hrp then
-					local doorCheckParams = RaycastParams.new()
-					doorCheckParams.FilterDescendantsInstances = { enemyChar }
-					doorCheckParams.FilterType = Enum.RaycastFilterType.Exclude
+				local dist = DistanceManager.getDistance(npc, currentTarget)
 
-					local origin = hrp.Position + Vector3.new(0, 1, 0)
-					local direction = finalPos - origin
+				if DEBUG_PRINT_DIST then
+					print(string.format(
+						"[%s] Distance to %s: %.2f | AttackRange: %.2f",
+						npc.Name, currentTarget.Name, dist, data.AttackDistance
+						))
+				end
 
-					local doorRay = workspace:Raycast(origin, direction, doorCheckParams)
+				local inRange = DistanceManager.isInRange(npc, currentTarget, data)
+				local hasLOS  = VisionSystem.hasLineOfSight(npc, currentTarget)
+				local los     = inRange and hasLOS
 
-					if doorRay then
-						local hitDist = (doorRay.Position - hrp.Position).Magnitude
-						if settings and settings.debugPrint then
-							settings.debugPrint(string.format(
-								"[%s] Attempt %d door-check ray hit '%s' at %.1f studs",
-								enemyChar.Name, attempt, doorRay.Instance:GetFullName(), hitDist
+				local faceRange       = data.FaceTargetRange or data.AttackDistance
+				local withinFaceRange = dist <= faceRange
+				local faceLos         = withinFaceRange and hasLOS
+
+				if DEBUG_PRINT_FACE then
+					print(string.format(
+						"[%s] dist=%.1f faceRange=%.1f within=%s hasLOS=%s faceLos=%s autoRotate=%s",
+						npc.Name, dist, faceRange, tostring(withinFaceRange), tostring(hasLOS), tostring(faceLos), tostring(humanoid.AutoRotate)
+						))
+				end
+
+				if faceLos then
+					humanoid.AutoRotate = false
+					VisionSystem.faceTarget(npc, currentTarget)
+				else
+					humanoid.AutoRotate = true
+					VisionSystem.stopFacing(npc)
+				end
+
+				if los then
+					if not isAttacking then
+						AI.Stop(npc)
+						isAttacking = true
+						local root = npc:FindFirstChild("HumanoidRootPart")
+						attackStandPos = root and root.Position or nil
+					end
+
+					rePathTimer = os.clock()
+					stuck.suppress()
+					pathFailCount[npc] = 0
+
+					if attackStandPos then
+						humanoid:MoveTo(attackStandPos)
+					end
+
+					CombatManager.tryAttack(npc, currentTarget, data)
+
+				else
+					-- StandStillAfter: NPC just cast an attack and is frozen in place.
+					-- Suppress all movement and stuck checks for the duration.
+					-- The NPC can still attack again once debounce/cooldown allows
+					-- IF the player comes back into range — but it will not chase.
+					if CombatManager.isStandingStill(npc) then
+						stuck.suppress()
+						AI.Stop(npc)
+						if DEBUG then
+							print(string.format(
+								"[%s] StandStillAfter active — suppressing movement.",
+								npc.Name
 								))
 						end
+					else
+						if npc:GetAttribute("CrossingDoor") then
+							stuck.suppress()
+							pathFailCount[npc] = 0
+						else
+							stuck.update(npc)
+						end
 
-						if hitDist <= 12 then
-							-- Check if the hit part belongs to any tagged door model
-							for _, doorModel in ipairs(CollectionService:GetTagged("Door")) do
-								if doorRay.Instance:IsDescendantOf(doorModel) then
-									local openVal = doorModel:FindFirstChild("Open")
-									if openVal and openVal:IsA("BoolValue") then
-										blockedByDoor = true
-										if settings and settings.debugPrint then
-											settings.debugPrint(string.format(
-												"[%s] Attempt %d: ray hit door model '%s' (Open=%s) — %s.",
-												enemyChar.Name, attempt, doorModel:GetFullName(),
-												tostring(openVal.Value),
-												openVal.Value == false and "accepting position" or "door already open, still accepting"
-												))
-										end
-									end
-									break
+						local failures = pathFailCount[npc] or 0
+						local now      = os.clock()
+
+						if failures >= DOOR_OPEN_FAIL_THRESHOLD then
+							local opened = tryOpenBlockingDoor(npc, currentTarget, data)
+							if opened then
+								if DEBUG then
+									print(string.format("[%s] Proactively opened blocking door, repathing.", npc.Name))
 								end
+								pathFailCount[npc] = 0
+								task.delay(0.5, function()
+									if currentTarget and humanoid.Health > 0 then
+										AI.Stop(npc)
+										AI.SmartPathfind(npc, currentTarget)
+										rePathTimer = os.clock()
+									end
+								end)
 							end
 						end
-					else
-						if settings and settings.debugPrint then
-							settings.debugPrint(string.format(
-								"[%s] Attempt %d door-check ray hit nothing — target may be in same room.",
-								enemyChar.Name, attempt
-								))
+
+						local targetOnImpassable = stuck.isTargetOnImpassableSurface(currentTarget, config.AgentInfo.Costs)
+
+						if not isAttacking and stuck.isStuck() then
+							if targetOnImpassable then
+								stuck.suppress()
+								if DEBUG then
+									print(string.format(
+										"[%s] Target is on impassable surface — suppressing stuck recovery.",
+										npc.Name
+										))
+								end
+							elseif stuck.shouldEscalateToRepath() then
+								stuck.resetUnstuckAttempts()
+								forceRepath()
+							else
+								stuck.attemptUnstuck(npc, currentTarget, AI)
+							end
+						else
+							local now = os.clock()
+							local shouldRepath = isAttacking
+								or (now - rePathTimer >= REPATH_INTERVAL)
+
+							if shouldRepath then
+								resetAttackState()
+								rePathTimer = now
+								AI.SmartPathfind(npc, currentTarget)
+							end
 						end
 					end
 				end
-
-				if not blockedByDoor then
-					table.insert(attemptsLog, string.format(
-						"  Attempt %d: pre-path verify failed (unreachable, no door)", attempt
-						))
-					continue
-				end
-				-- blockedByDoor = true, fall through to return finalPos
-			end
-
-			if settings and settings.debugPrint then
-				settings.debugPrint(string.format(
-					"[%s] Found valid wander position on attempt %d: %.0f studs away",
-					enemyChar.Name, attempt, distance
-					))
-			end
-			return finalPos
-		end
-
-		if settings and settings.debugPrint then
-			settings.debugPrint(string.format(
-				"[%s] All wander position attempts failed:",
-				enemyChar.Name
-				))
-			for _, line in ipairs(attemptsLog) do
-				settings.debugPrint(line)
-			end
-			settings.debugPrint("Falling back to nearby offset.")
-		end
-
-		return startPosition + Vector3.new(math.random(-5, 5), 0, math.random(-5, 5))
-	end
-
-	function SmartWander.wanderToPosition(enemyChar, ai, targetPosition, settings, myGen)
-		if not isWandering or wanderGeneration ~= myGen or not enemyChar or not enemyChar.Parent then return false end
-		if not targetPosition then return false end
-
-		SmartWander.cleanupBodyGyro(enemyChar)
-
-		local config = ai.GetConfig(enemyChar)
-
-		config.Tracking.Enabled      = false
-		config.Visualization.Enabled = settings.visualize or false
-
-		local reachedGoal = false
-		local pathFailed  = false
-
-		-- Delegate entirely to DoorOpener — single authority for Open.Value
-		config.Hooks.PathfindingLinkReached = function(NPC, WP)
-			if wanderGeneration ~= myGen then return true end
-
-			if settings.BreaksDoors then
-				if not WP.Label or not string.find(string.lower(WP.Label), "door") then return true end
-				local human = NPC:FindFirstChild("Humanoid")
-				if human then human:Move(Vector3.zero) end
-				SmartWander.faceRandomDirection(NPC)
-				return false
-			end
-
-			return DoorOpener.onPathfindingLinkReached(NPC, WP)
-		end
-
-		config.Hooks.PathingFailed = function(NPC, reason)
-			if wanderGeneration ~= myGen then return false end
-
-			wanderPathFailCount += 1
-			pathFailed = true
-
-			if settings.debugPrint then
-				settings.debugPrint(string.format(
-					"[%s] Could not pathfind to wander target (fail #%d) | target: (%.1f, %.1f, %.1f)",
-					NPC.Name, wanderPathFailCount,
-					targetPosition.X, targetPosition.Y, targetPosition.Z
-					))
-			end
-
-			-- Try proactive door open on first failure
-			if wanderPathFailCount >= 1 then
-				local opened = tryOpenDoorTowardWanderTarget(NPC, targetPosition, settings)
-				if opened then
-					if settings.debugPrint then
-						settings.debugPrint(string.format(
-							"[%s] Opened blocking door — retrying pathfind in 0.5s.",
-							NPC.Name
-							))
-					end
-					wanderPathFailCount = 0
-					pathFailed = false
-					task.delay(0.5, function()
-						if isWandering and wanderGeneration == myGen and NPC and NPC.Parent then
-							ai.SmartPathfind(NPC, targetPosition)
-						end
-					end)
-				else
-					if settings.debugPrint then
-						settings.debugPrint(string.format(
-							"[%s] No door found — giving up on this wander point.",
-							NPC.Name
-							))
-					end
-				end
-			end
-
-			return false
-		end
-
-		config.Hooks.GoalReached = function(NPC, Target)
-			if wanderGeneration ~= myGen then return true end
-
-			reachedGoal = true
-			wanderPathFailCount = 0
-
-			if settings.debugPrint then
-				settings.debugPrint(string.format(
-					"[%s] Reached wander point at (%.1f, %.1f, %.1f)",
-					NPC.Name, targetPosition.X, targetPosition.Y, targetPosition.Z
-					))
-			end
-
-			if isWandering and wanderGeneration == myGen and enemyChar and enemyChar.Parent then
-				SmartWander.faceRandomDirection(enemyChar)
-			end
-			return true
-		end
-
-		if settings.debugPrint then
-			settings.debugPrint(string.format(
-				"[%s] Pathing to wander target at (%.1f, %.1f, %.1f)",
-				enemyChar.Name, targetPosition.X, targetPosition.Y, targetPosition.Z
-				))
-		end
-
-		ai.SmartPathfind(enemyChar, targetPosition)
-
-		local startTime = os.clock()
-		while isWandering and wanderGeneration == myGen and not reachedGoal and not pathFailed and os.clock() - startTime < 12 do
-			task.wait(0.1)
-		end
-
-		if settings.debugPrint then
-			if reachedGoal then
-				settings.debugPrint(string.format("[%s] Wander trip complete.", enemyChar.Name))
-			elseif pathFailed then
-				settings.debugPrint(string.format("[%s] Wander trip ended — path failed.", enemyChar.Name))
-			elseif os.clock() - startTime >= 12 then
-				settings.debugPrint(string.format("[%s] Wander trip timed out after 12s.", enemyChar.Name))
 			else
-				settings.debugPrint(string.format("[%s] Wander trip ended — combat started.", enemyChar.Name))
-			end
-		end
+				local postCombatDelay = (data.Wander and data.Wander.PostCombatDelay) or 0
+				local delayElapsed    = os.clock() - lastCombatEndTime >= postCombatDelay
 
-		if isWandering and wanderGeneration == myGen and not reachedGoal then
-			ai.Stop(enemyChar)
-		end
-
-		return reachedGoal and wanderGeneration == myGen
-	end
-
-	function SmartWander.startWandering(enemyChar, ai, customSettings)
-		if isWandering then return end
-
-		local settings = {}
-		for k, v in pairs(defaultSettings) do settings[k] = v end
-		if customSettings then
-			for k, v in pairs(customSettings) do settings[k] = v end
-		end
-
-		isWandering = true
-		wanderGeneration += 1
-		wanderPathFailCount = 0
-		local myGen = wanderGeneration
-
-		if settings.debugPrint then
-			settings.debugPrint(string.format(
-				"[%s] No targets found — beginning wander (gen %d).",
-				enemyChar.Name, myGen
-				))
-		end
-		ai.Stop(enemyChar)
-
-		wanderCoroutine = task.spawn(function()
-			while isWandering and wanderGeneration == myGen and enemyChar and enemyChar.Parent do
-				-- Pass ai so findValidWanderPosition can read AgentInfo
-				local wanderTarget = SmartWander.findValidWanderPosition(enemyChar, ai, 8, {
-					minDist = settings.MinWanderDistance,
-					maxDist = settings.MaxWanderDistance,
-				}, settings)
-				SmartWander.cleanupBodyGyro(enemyChar)
-
-				if settings.debugPrint then
-					settings.debugPrint(string.format(
-						"[%s] Selected wander target: (%.1f, %.1f, %.1f)",
-						enemyChar.Name,
-						wanderTarget and wanderTarget.X or 0,
-						wanderTarget and wanderTarget.Y or 0,
-						wanderTarget and wanderTarget.Z or 0
-						))
-				end
-
-				local success = SmartWander.wanderToPosition(enemyChar, ai, wanderTarget, settings, myGen)
-
-				if wanderGeneration ~= myGen then break end
-
-				if success then
-					local minWait   = settings.MinWanderWait or 4
-					local maxWait   = settings.MaxWanderWait or 10
-					local waitTime  = math.random(minWait, maxWait)
-
-					if settings.debugPrint then
-						settings.debugPrint(string.format(
-							"[%s] Idling for %ds (range %d-%d).",
-							enemyChar.Name, waitTime, minWait, maxWait
-							))
-					end
-
-					local waitStart = os.clock()
-					while isWandering and wanderGeneration == myGen and os.clock() - waitStart < waitTime do
-						task.wait(1)
-					end
-					if isWandering and wanderGeneration == myGen and enemyChar and enemyChar.Parent then
-						SmartWander.faceRandomDirection(enemyChar)
-					end
-				else
-					if settings.debugPrint then
-						settings.debugPrint(string.format(
-							"[%s] Wander trip failed — waiting 1s before next attempt.",
-							enemyChar.Name
-							))
-					end
-					task.wait(1)
+				if wander and not wander.isWandering() and delayElapsed and wander.shouldCheckForWander() then
+					wander.startWandering(npc, AI)
 				end
 			end
-
-			if wanderGeneration == myGen and enemyChar and enemyChar.Parent then
-				ai.Stop(enemyChar)
-				SmartWander.cleanupBodyGyro(enemyChar)
-			end
-			if settings.debugPrint then
-				settings.debugPrint(string.format(
-					"[%s] Wander loop exited (gen %d).",
-					enemyChar.Name, myGen
-					))
-			end
-		end)
-	end
-
-	function SmartWander.stopWandering(enemyChar, ai)
-		if not isWandering then return end
-
-		isWandering = false
-		wanderGeneration += 1
-
-		if wanderCoroutine then
-			task.cancel(wanderCoroutine)
-			wanderCoroutine = nil
 		end
-		if enemyChar and enemyChar.Parent then
-			ai.Stop(enemyChar)
-			SmartWander.cleanupBodyGyro(enemyChar)
+
+		if npc.Parent == nil or not npc:FindFirstChild("HumanoidRootPart") then
+			if wander then wander.stopWandering(npc, AI) end
+			CombatManager.cleanup(npc)
+			VisionSystem.stopFacing(npc)
+			pathFailCount[npc] = nil
+			lastFootstep[npc] = nil
 		end
-		defaultSettings.debugPrint(string.format(
-			"[%s] Wander stopped — target detected.",
-			enemyChar and enemyChar.Name or "?"
-			))
-	end
-
-	function SmartWander.isWandering()
-		return isWandering
-	end
-
-	function SmartWander.shouldCheckForWander()
-		if os.clock() - lastWanderCheck > defaultSettings.WANDER_CHECK_INTERVAL then
-			lastWanderCheck = os.clock()
-			return true
-		end
-		return false
-	end
-
-	function SmartWander.updateSettings(newSettings)
-		for k, v in pairs(newSettings) do defaultSettings[k] = v end
-	end
-
-	return SmartWander
+	end)
 end
+
+for _, npc in enemiesFolder:GetChildren() do
+	setupEnemy(npc)
+end
+
+enemiesFolder.ChildAdded:Connect(function(npc)
+	task.wait()
+	setupEnemy(npc)
+end)
