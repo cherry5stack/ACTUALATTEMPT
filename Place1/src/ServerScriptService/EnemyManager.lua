@@ -1,7 +1,6 @@
 -- EnemyManager.lua
 local rs = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
-local busyNPCs = {}
 local VisionSystem     = require(rs.VisionSystem)
 local AI               = require(rs.Forbidden.AI)
 local EnemyData        = require(rs.EnemyData)
@@ -13,6 +12,7 @@ local SoundManager     = require(rs.SoundManager)
 local SmartWanderCtor  = require(rs.SmartWander)
 local PhaseManager     = require(rs.PhaseManager)
 local DoorOpener       = require(rs.DoorOpener)
+
 
 local enemiesFolder = workspace:WaitForChild("Enemies")
 
@@ -61,71 +61,8 @@ local function debugGroundCheck(npc, agentCosts)
 	end
 end
 
-local function tryOpenBlockingDoor(npc, target, data)
-	if not target or not target.Character then return false end
 
-	if busyNPCs[npc] then return true end
 
-	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-	local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
-	if not npcRoot or not targetRoot then return false end
-
-	local origin    = npcRoot.Position + Vector3.new(0, 1, 0)
-	local direction = targetRoot.Position - origin
-
-	local params = RaycastParams.new()
-	params.FilterDescendantsInstances = { npc, target.Character }
-	params.FilterType = Enum.RaycastFilterType.Exclude
-
-	local result = workspace:Raycast(origin, direction, params)
-	if not result then return false end
-
-	local inst = result.Instance
-	for _ = 1, 5 do
-		if not inst then break end
-
-		local openVal = inst:FindFirstChild("Open")
-		local doorScript = inst:FindFirstChild("Door")
-		local actualOpenValue = nil
-		local doorInstance = nil
-
-		if openVal and openVal:IsA("BoolValue") and openVal.Value == false then
-			actualOpenValue = openVal
-			doorInstance = inst
-		elseif doorScript then
-			local openVal2 = doorScript:FindFirstChild("Open")
-			if openVal2 and openVal2:IsA("BoolValue") then
-				actualOpenValue = openVal2
-				doorInstance = inst
-			end
-		end
-
-		if actualOpenValue and doorInstance then
-			if actualOpenValue.Value == true then
-				return true
-			end
-
-			busyNPCs[npc] = true
-
-			if DEBUG then
-				print(string.format("[%s] opening door '%s' and locking state.", npc.Name, doorInstance.Name))
-			end
-
-			actualOpenValue.Value = true
-
-			task.spawn(function()
-				task.wait(0.5)
-				busyNPCs[npc] = nil
-			end)
-
-			return true
-		end
-
-		inst = inst.Parent
-	end
-
-	return false
-end
 
 local function setupEnemy(npc)
 	local humanoid = npc:FindFirstChildOfClass("Humanoid")
@@ -177,7 +114,7 @@ local function setupEnemy(npc)
 	config.Tracking.CollinearTargetPositionOffset  = 0
 	config.AgentInfo.AgentRadius                  = data.AgentRadius
 	config.AgentInfo.AgentHeight                  = data.AgentHeight
-	config.AgentInfo.Costs                        = data.AgentCosts or { Obstacle = math.huge }
+	config.AgentInfo.Costs = data.AgentCosts or { Obstacle = math.huge, Door = 5 }
 	config.DirectMoveTo.Enabled                   = false
 	config.Hooks.PathingFailed                    = defaultPathingFailed
 
@@ -237,11 +174,11 @@ local function setupEnemy(npc)
 		local rePathTimer        = 0
 		local SWAP_DELAY         = 1
 		local pursuitActiveUntil = 0
-		local lastDoorOpenAttempt = 0
-		local DOOR_OPEN_FAIL_THRESHOLD = 1
-		local DOOR_OPEN_COOLDOWN = 2
 
 		local stuck = StuckRecovery()
+
+		local lastDoorCheckTime = 0
+		local DOOR_CHECK_INTERVAL = 1 -- seconds; ComputeAsync is too heavy for every 0.1s tick
 
 		local function resetAttackState()
 			isAttacking    = false
@@ -320,6 +257,54 @@ local function setupEnemy(npc)
 			if currentTarget then
 				pursuitActiveUntil = os.clock() + (data.PursueLingerTime or 0)
 
+				-- Suppress stuck recovery while actively breaking a door
+				if DoorOpener.IsBreaking(npc) then
+					stuck.suppress()
+				end
+
+				-- Path-aware door handling for all enemy types, throttled since
+				-- FindBlockingDoor runs a real ComputeAsync. Breakers attack the
+				-- door; non-breakers simply request it open. Both only act on doors
+				-- that are actually on the computed route to the target, avoiding
+				-- the "opens every nearby door" problem of proximity-based openers.
+				-- Skip door check during StandStillAfter — the NPC is frozen in place
+				-- and should not start a door break until it's free to move again.
+				if not DoorOpener.IsBreaking(npc) and not CombatManager.isStandingStill(npc) and os.clock() - lastDoorCheckTime >= DOOR_CHECK_INTERVAL then
+					lastDoorCheckTime = os.clock()
+
+					local targetChar = currentTarget.Character
+					local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+					if targetRoot then
+						local blockingDoor = DoorOpener.FindBlockingDoor(npc, targetRoot.Position, config.AgentInfo)
+						if blockingDoor then
+							if data.BreaksDoors then
+								if DEBUG then
+									print(string.format("[%s] Door '%s' is blocking — attacking it.", npc.Name, blockingDoor:GetFullName()))
+								end
+								AI.Stop(npc)
+								DoorOpener.AttackDoor(npc, blockingDoor, {
+									AnimationName = data.DoorAttack and data.DoorAttack.AnimationName or "Punch",
+									AttackSpeed   = data.DoorAttack and data.DoorAttack.AttackSpeed or 1,
+									Cooldown      = data.DoorAttack and data.DoorAttack.Cooldown or 1,
+									Damage        = data.DoorDamage or 10,
+									AttackRange   = data.DoorAttackRange or data.AttackDistance or 5,
+								}, function()
+									if currentTarget and humanoid.Health > 0 then
+										task.wait(0.2)
+										AI.SmartPathfind(npc, currentTarget)
+										rePathTimer = os.clock()
+									end
+								end)
+							else
+								if DEBUG then
+									print(string.format("[%s] Door '%s' is blocking — opening it.", npc.Name, blockingDoor:GetFullName()))
+								end
+								DoorOpener.RequestOpen(npc, blockingDoor, data.DoorAttackRange or data.AttackDistance or 5)
+							end
+						end
+					end
+				end
+
 				local dist = DistanceManager.getDistance(npc, currentTarget)
 
 				if DEBUG_PRINT_DIST then
@@ -373,48 +358,31 @@ local function setupEnemy(npc)
 				else
 					-- StandStillAfter: NPC just cast an attack and is frozen in place.
 					-- Suppress all movement and stuck checks for the duration.
-					-- The NPC can still attack again once debounce/cooldown allows
-					-- IF the player comes back into range — but it will not chase.
 					if CombatManager.isStandingStill(npc) then
 						stuck.suppress()
 						AI.Stop(npc)
 						if DEBUG then
 							print(string.format(
-								"[%s] StandStillAfter active — suppressing movement.",
-								npc.Name
+								"[%s] StandStillAfter active — suppressing movement. inRange=%s",
+								npc.Name, tostring(inRange)
 								))
+						end
+						if inRange then
+							CombatManager.tryAttack(npc, currentTarget, data)
 						end
 					else
 						if npc:GetAttribute("CrossingDoor") then
 							stuck.suppress()
 							pathFailCount[npc] = 0
+						elseif DoorOpener.IsBreaking(npc) then
+							stuck.suppress()
 						else
 							stuck.update(npc)
 						end
 
-						local failures = pathFailCount[npc] or 0
-						local now      = os.clock()
-
-						if failures >= DOOR_OPEN_FAIL_THRESHOLD then
-							local opened = tryOpenBlockingDoor(npc, currentTarget, data)
-							if opened then
-								if DEBUG then
-									print(string.format("[%s] Proactively opened blocking door, repathing.", npc.Name))
-								end
-								pathFailCount[npc] = 0
-								task.delay(0.5, function()
-									if currentTarget and humanoid.Health > 0 then
-										AI.Stop(npc)
-										AI.SmartPathfind(npc, currentTarget)
-										rePathTimer = os.clock()
-									end
-								end)
-							end
-						end
-
 						local targetOnImpassable = stuck.isTargetOnImpassableSurface(currentTarget, config.AgentInfo.Costs)
 
-						if not isAttacking and stuck.isStuck() then
+						if not isAttacking and not DoorOpener.IsBreaking(npc) and stuck.isStuck() then
 							if targetOnImpassable then
 								stuck.suppress()
 								if DEBUG then
@@ -430,14 +398,22 @@ local function setupEnemy(npc)
 								stuck.attemptUnstuck(npc, currentTarget, AI)
 							end
 						else
-							local now = os.clock()
-							local shouldRepath = isAttacking
-								or (now - rePathTimer >= REPATH_INTERVAL)
+							-- Suppress all movement logic while actively breaking a door.
+							-- DoorOpener.AttackDoor manages its own MoveTo calls during this time
+							-- and AI.SmartPathfind would fight them directly via Forbidden's waypoint loop.
+							if DoorOpener.IsBreaking(npc) then
+								stuck.suppress()
+								rePathTimer = os.clock() -- reset so it doesn't immediately repath when break ends
+							else
+								local now = os.clock()
+								local shouldRepath = isAttacking
+									or (now - rePathTimer >= REPATH_INTERVAL)
 
-							if shouldRepath then
-								resetAttackState()
-								rePathTimer = now
-								AI.SmartPathfind(npc, currentTarget)
+								if shouldRepath then
+									resetAttackState()
+									rePathTimer = now
+									AI.SmartPathfind(npc, currentTarget)
+								end
 							end
 						end
 					end
