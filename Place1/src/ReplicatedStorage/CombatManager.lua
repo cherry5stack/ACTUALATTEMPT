@@ -12,7 +12,7 @@ local DamageEvent = ReplicatedStorage:WaitForChild("DamageEvent")
 local ParticleEvent = ReplicatedStorage:WaitForChild("ParticleEvent")
 
 local lastAttackTimes = {}
-local activeAnimations = {}
+-- activeAnimations removed: attacks are gated only by Cooldown and AttackDebounce
 local lastAttackEnd = {}
 local spawnTimes = {}
 local standingStill = {} -- [npc] = true while StandStillAfter is active
@@ -159,24 +159,26 @@ function CombatManager.isStandingStill(npc)
 end
 
 function CombatManager.tryAttack(npc, target, data)
-	if not isNpcAlive(npc) then return end
-	if PhaseManager.isTransitioning(npc) then return end
+	if DEBUG then print(string.format("[%s] tryAttack called", npc.Name)) end
+	if not isNpcAlive(npc) then if DEBUG then print(string.format("[%s] tryAttack — NPC dead", npc.Name)) end return end
+	if PhaseManager.isTransitioning(npc) then if DEBUG then print(string.format("[%s] tryAttack — phase transitioning", npc.Name)) end return end
 
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-	if not npcRoot then return end
+	if not npcRoot then if DEBUG then print(string.format("[%s] tryAttack — no npcRoot", npc.Name)) end return end
 
 	local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
-	if not targetRoot then return end
+	if not targetRoot then if DEBUG then print(string.format("[%s] tryAttack — no targetRoot", npc.Name)) end return end
 
 	local targetHum = target.Character and target.Character:FindFirstChildOfClass("Humanoid")
-	if not targetHum or targetHum.Health <= 0 then return end
+	if not targetHum or targetHum.Health <= 0 then if DEBUG then print(string.format("[%s] tryAttack — target dead/missing", npc.Name)) end return end
 
-	if activeAnimations[npc] then return end
 
 	if not lastAttackTimes[npc] then lastAttackTimes[npc] = {} end
 
 	local timeAlive = os.clock() - (spawnTimes[npc] or os.clock())
-	local dist = (npcRoot.Position - targetRoot.Position).Magnitude
+	local npcPos = npcRoot.Position
+	local targetPos = targetRoot.Position
+	local dist = Vector3.new(npcPos.X - targetPos.X, 0, npcPos.Z - targetPos.Z).Magnitude
 
 	local validAttacks = {}
 	for _, attack in ipairs(data.Attacks) do
@@ -185,7 +187,7 @@ function CombatManager.tryAttack(npc, target, data)
 		if attack.RequiresPhase and PhaseManager.getCurrentPhase(npc) < attack.RequiresPhase then continue end
 
 		local lastTime = lastAttackTimes[npc][attack.Name] or 0
-		if dist <= attack.Range and os.clock() - lastTime >= attack.Cooldown then
+		if dist <= attack.Range and os.clock() - lastTime >= (attack.Cooldown or 0) then
 			table.insert(validAttacks, attack)
 		end
 	end
@@ -209,10 +211,29 @@ function CombatManager.tryAttack(npc, target, data)
 	local debounce = chosen.AttackDebounce or 0
 	if os.clock() - (lastAttackEnd[npc] or 0) < debounce then return end
 
+	-- While standing still (from a previous StandStillAfter), only block attacks
+	-- that themselves have StandStillAfter — let quick attacks like Punch through.
+	-- Set the cooldown before returning so HeavySlam can't monopolize the slot
+	-- every tick while standingStill is active.
+	if standingStill[npc] and (chosen.StandStillAfter and chosen.StandStillAfter > 0) then
+		lastAttackTimes[npc][chosen.Name] = os.clock()
+		return
+	end
+
+	-- AttackDebounce: set at cast time — blocks ALL attacks until it expires.
+	-- Cooldown: set when the Hit marker fires — blocks THIS attack specifically.
+	lastAttackEnd[npc] = os.clock()
+
+	if DEBUG then
+		print(string.format("[%s] Attack '%s' cast.", npc.Name, chosen.Name))
+	end
+
 	local animator = npc:FindFirstChildOfClass("Humanoid")
 		and npc:FindFirstChildOfClass("Humanoid"):FindFirstChildOfClass("Animator")
 
 	if not animator then
+		if DEBUG then print(string.format("[%s] No animator — spawning hitbox directly.", npc.Name)) end
+		lastAttackTimes[npc][chosen.Name] = os.clock()
 		spawnHitbox(npcRoot, npc, chosen)
 		return
 	end
@@ -221,39 +242,15 @@ function CombatManager.tryAttack(npc, target, data)
 	local animObject = animFolder and animFolder:FindFirstChild(chosen.AnimationName)
 
 	if not animObject then
+		if DEBUG then print(string.format("[%s] No animation '%s' — spawning hitbox directly.", npc.Name, chosen.AnimationName)) end
+		lastAttackTimes[npc][chosen.Name] = os.clock()
 		spawnHitbox(npcRoot, npc, chosen)
 		return
 	end
 
 	local track = animator:LoadAnimation(animObject)
-	activeAnimations[npc] = true
-
-	local animDone = false
-	local hitboxDone = false
 
 	local castAppearance = chosen.CastAppearance
-
-	local function tryRelease()
-		if animDone and hitboxDone then
-			if DEBUG then
-				print(string.format(
-					"[%s] Attack '%s' complete — releasing immediately.",
-					npc.Name, chosen.Name
-					))
-			end
-			activeAnimations[npc] = false
-			lastAttackEnd[npc] = os.clock()
-			lastAttackTimes[npc][chosen.Name] = os.clock()
-		end
-	end
-
-	track.Stopped:Connect(function()
-		animDone = true
-		if castAppearance and castAppearance.Enabled then
-			AppearanceManager.restoreModel(npc, castAppearance.FadeOutTime)
-		end
-		tryRelease()
-	end)
 
 	SoundManager.play(chosen.Sounds and chosen.Sounds.Swing, npcRoot.Position)
 
@@ -266,26 +263,16 @@ function CombatManager.tryAttack(npc, target, data)
 		AppearanceManager.tintModel(npc, castAppearance.Color, castAppearance.FadeInTime)
 	end
 
-	-- START StandStillAfter at cast time, not after animation ends.
-	-- This freezes movement for the duration starting from when the attack begins.
-	-- The NPC is free to attack again once debounce/cooldown allows,
-	-- but will not move until StandStillAfter expires.
 	if chosen.StandStillAfter and chosen.StandStillAfter > 0 then
 		standingStill[npc] = true
 		if DEBUG then
 			print(string.format(
-				"[%s] Attack '%s' cast — standing still for %.2fs from now.",
-				npc.Name, chosen.Name, chosen.StandStillAfter
+				"[%s] StandStillAfter %.2fs starting now.",
+				npc.Name, tonumber(chosen.StandStillAfter) or 0
 				))
 		end
 		task.delay(chosen.StandStillAfter, function()
 			if not isNpcAlive(npc) then
-				if DEBUG then
-					print(string.format(
-						"[%s] StandStillAfter expired but NPC is dead — skipping release.",
-						npc.Name
-						))
-				end
 				standingStill[npc] = nil
 				return
 			end
@@ -293,7 +280,7 @@ function CombatManager.tryAttack(npc, target, data)
 			if DEBUG then
 				print(string.format(
 					"[%s] StandStillAfter %.2fs elapsed — free to move again.",
-					npc.Name, chosen.StandStillAfter
+					npc.Name, tonumber(chosen.StandStillAfter) or 0
 					))
 			end
 		end)
@@ -302,15 +289,13 @@ function CombatManager.tryAttack(npc, target, data)
 	track:Play(nil, nil, chosen.AttackSpeed or 1)
 
 	track:GetMarkerReachedSignal("Hit"):Connect(function()
-		if not isNpcAlive(npc) then
-			hitboxDone = true
-			tryRelease()
-			return
+		if not isNpcAlive(npc) then return end
+		-- Per-attack Cooldown starts when the hit lands, not when cast.
+		lastAttackTimes[npc][chosen.Name] = os.clock()
+		spawnHitbox(npcRoot, npc, chosen)
+		if castAppearance and castAppearance.Enabled then
+			AppearanceManager.restoreModel(npc, castAppearance.FadeOutTime)
 		end
-		spawnHitbox(npcRoot, npc, chosen, function()
-			hitboxDone = true
-			tryRelease()
-		end)
 	end)
 end
 
@@ -320,7 +305,6 @@ function CombatManager.cleanup(npc)
 	PhaseManager.cleanup(npc)
 	standingStill[npc] = nil
 	lastAttackTimes[npc] = nil
-	activeAnimations[npc] = nil
 	lastAttackEnd[npc] = nil
 	spawnTimes[npc] = nil
 end
