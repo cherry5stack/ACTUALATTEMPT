@@ -173,6 +173,15 @@ EnemyData["Fighter"] = {
 		Death    = "FighterDeath",
 		Footstep = "FighterFootstep",
 	},
+	DoorAttackRange = 1,
+	BreaksDoors = true,
+	DoorDamage  = 15, -- fallback used if DoorAttack isn't set
+	DoorAttack  = {
+		AnimationName = "Punch", -- reuse an existing animation in ReplicatedStorage.Animations
+		AttackSpeed   = 1,
+		Cooldown      = 1,
+		Damage        = 15,
+	},
 }
 
 return EnemyData
