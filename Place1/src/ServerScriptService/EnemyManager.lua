@@ -114,7 +114,7 @@ local function setupEnemy(npc)
 	config.Tracking.CollinearTargetPositionOffset  = 0
 	config.AgentInfo.AgentRadius                  = data.AgentRadius
 	config.AgentInfo.AgentHeight                  = data.AgentHeight
-	config.AgentInfo.Costs = data.AgentCosts or { Obstacle = math.huge, Door = 5 }
+	config.AgentInfo.Costs = data.AgentCosts or { Obstacle = math.huge, Door = 1 }
 	config.DirectMoveTo.Enabled                   = false
 	config.Hooks.PathingFailed                    = defaultPathingFailed
 
@@ -283,11 +283,12 @@ local function setupEnemy(npc)
 								end
 								AI.Stop(npc)
 								DoorOpener.AttackDoor(npc, blockingDoor, {
-									AnimationName = data.DoorAttack and data.DoorAttack.AnimationName or "Punch",
-									AttackSpeed   = data.DoorAttack and data.DoorAttack.AttackSpeed or 1,
-									Cooldown      = data.DoorAttack and data.DoorAttack.Cooldown or 1,
-									Damage        = data.DoorDamage or 10,
-									AttackRange   = data.DoorAttackRange or data.AttackDistance or 5,
+									AnimationName  = data.DoorAttack and data.DoorAttack.AnimationName or "Punch",
+									AttackSpeed    = data.DoorAttack and data.DoorAttack.AttackSpeed or 1,
+									Cooldown       = data.DoorAttack and data.DoorAttack.Cooldown or 1,
+									Damage         = data.DoorDamage or 10,
+									AttackRange    = data.DoorAttackRange or data.AttackDistance or 5,
+									MaxHeightDiff  = data.DoorAttackHeight or 5,
 								}, function()
 									if currentTarget and humanoid.Health > 0 then
 										task.wait(0.2)
@@ -299,7 +300,7 @@ local function setupEnemy(npc)
 								if DEBUG then
 									print(string.format("[%s] Door '%s' is blocking — opening it.", npc.Name, blockingDoor:GetFullName()))
 								end
-								DoorOpener.RequestOpen(npc, blockingDoor, data.DoorAttackRange or data.AttackDistance or 5)
+								DoorOpener.RequestOpen(npc, blockingDoor, data.DoorAttackRange or data.AttackDistance or 5, data.DoorAttackHeight or 5)
 							end
 						end
 					end
@@ -403,6 +404,7 @@ local function setupEnemy(npc)
 							-- and AI.SmartPathfind would fight them directly via Forbidden's waypoint loop.
 							if DoorOpener.IsBreaking(npc) then
 								stuck.suppress()
+								AI.Stop(npc) -- cancel any in-progress pathfind toward the player
 								rePathTimer = os.clock() -- reset so it doesn't immediately repath when break ends
 							else
 								local now = os.clock()
