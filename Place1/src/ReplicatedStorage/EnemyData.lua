@@ -114,7 +114,7 @@ EnemyData["Fighter"] = {
 		Obstacle    = math.huge,
 		CrackedLava = math.huge,
 	},
-	
+
 	PhaseCooldown = 3, -- minimum 3 seconds after any phase ends before another can begin
 	-- Phase 2 triggers once Health <= 50% of MaxHealth (i.e. <= 50).
 	-- NPC freezes, plays EnrageRoar (if the animation exists), tints red,
@@ -173,8 +173,9 @@ EnemyData["Fighter"] = {
 		Death    = "FighterDeath",
 		Footstep = "FighterFootstep",
 	},
-	DoorAttackRange = 1,
-	BreaksDoors = true,
+	DoorAttackRange  = 40,
+	DoorAttackHeight = 5,  -- max Y studs above/below door to swing or open
+	BreaksDoors = false,
 	DoorDamage  = 15, -- fallback used if DoorAttack isn't set
 	DoorAttack  = {
 		AnimationName = "Punch", -- reuse an existing animation in ReplicatedStorage.Animations
