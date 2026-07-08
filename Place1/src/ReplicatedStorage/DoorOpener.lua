@@ -88,9 +88,7 @@ function DoorOpener.FindBlockingDoor(NPC: Instance, TargetPos: Vector3, AgentInf
 		if not openValue or openValue.Value == true then continue end
 		local doorBBCF, _ = doorModel:GetBoundingBox()
 		local doorCenter   = doorBBCF.Position
-		local npcDist = Vector3.new(
-			npcRoot.Position.X - doorCenter.X, 0, npcRoot.Position.Z - doorCenter.Z
-		).Magnitude
+		local npcDist = (npcRoot.Position - doorCenter).Magnitude
 		if npcDist <= DOOR_PROXIMITY_RANGE then
 			return doorModel
 		end
@@ -124,7 +122,7 @@ end
 -- Uses the same standoff positioning as AttackDoor so openers approach
 -- at a consistent distance before triggering the open, rather than
 -- opening from wherever they happen to be standing.
-function DoorOpener.RequestOpen(NPC: Instance, doorModel: Model, attackRange: number?)
+function DoorOpener.RequestOpen(NPC: Instance, doorModel: Model, attackRange: number?, maxHeightDiff: number?)
 	local range    = math.max(attackRange or 5, 2) -- never closer than 2 studs or NPC ends up inside the door
 	local npcRoot  = NPC:FindFirstChild("HumanoidRootPart")
 	local humanoid = NPC:FindFirstChildOfClass("Humanoid")
@@ -137,6 +135,13 @@ function DoorOpener.RequestOpen(NPC: Instance, doorModel: Model, attackRange: nu
 	local doorPos     = doorBBCF.Position
 	local toNPC       = npcRoot.Position - doorPos
 	local flatToNPC   = Vector3.new(toNPC.X, 0, toNPC.Z)
+
+	-- Y height check — don't open if NPC is too far above/below the door.
+	local yGap = math.abs(npcRoot.Position.Y - doorPos.Y)
+	if yGap > (maxHeightDiff or 5) then
+		dbg(NPC.Name, string.format("Y gap too large (%.1f studs) — skipping door open.", yGap))
+		return
+	end
 
 	-- If already within range, just open immediately.
 	if flatToNPC.Magnitude <= range then
@@ -370,7 +375,8 @@ function DoorOpener.AttackDoor(NPC: Instance, doorModel: Model, attackConfig: {[
 		return
 	end
 
-	local attackRange = math.max(attackConfig.AttackRange or 5, 2)
+	local attackRange    = math.max(attackConfig.AttackRange or 5, 2)
+	local maxHeightDiff  = attackConfig.MaxHeightDiff or 5
 
 	-- Use the bounding box center rather than pivot — pivot placement varies
 	-- per model but the bounding box center is always the physical middle of the door.
@@ -392,13 +398,11 @@ function DoorOpener.AttackDoor(NPC: Instance, doorModel: Model, attackConfig: {[
 
 		local standPos = nil
 		local function computeStandPos()
-			doorPos = getDoorCenter() -- refresh each time in case model moved
+			doorPos = getDoorCenter()
 			local toNPC     = (npcRoot.Position - doorPos)
 			local flatToNPC = Vector3.new(toNPC.X, 0, toNPC.Z)
 			if flatToNPC.Magnitude < 0.1 then return end
 
-			-- Stand directly behind the door center on the NPC's side —
-			-- no LookVector needed, just walk straight back from center.
 			standPos = Vector3.new(
 				doorPos.X + flatToNPC.Unit.X * (attackRange - 0.5),
 				npcRoot.Position.Y,
@@ -413,21 +417,24 @@ function DoorOpener.AttackDoor(NPC: Instance, doorModel: Model, attackConfig: {[
 
 		local function moveToAttackPosition()
 			if not standPos then return end
-			dbg(NPC.Name, string.format("Pathfinding to attack position: (%.1f, %.1f, %.1f)", standPos.X, standPos.Y, standPos.Z))
 
-			-- Pathfind to standoff position. We don't yield indefinitely because
-			-- EnemyManager may call AI.Stop (e.g. during StandStillAfter) which
-			-- cancels the pathfind and would hang us forever with Yields=true.
-			-- Instead, fire without yield and wait via polling with a timeout.
+			-- If already within attack range, no need to walk anywhere.
+			local currentDist = horizontalDist(npcRoot.Position, doorPos)
+			if currentDist <= attackRange + 1 then
+				dbg(NPC.Name, string.format("Already within attack range (%.1f studs) — skipping pathfind.", currentDist))
+				return
+			end
+
+			dbg(NPC.Name, string.format("Pathfinding to attack position: (%.1f, %.1f, %.1f)", standPos.X, standPos.Y, standPos.Z))
 			AI.SmartPathfind(NPC, standPos, false)
 
-			local deadline = os.clock() + 6 -- max 6s to reach standoff position
+			local deadline = os.clock() + 6
 			while os.clock() < deadline do
 				task.wait(0.1)
 				if not doorModel.Parent then break end
 				if openValue and openValue.Value == true then break end
-				local distToStand = horizontalDist(npcRoot.Position, standPos)
-				if distToStand <= attackRange + 1 then break end
+				local distToDoor = horizontalDist(npcRoot.Position, doorPos)
+				if distToDoor <= attackRange + 1 then break end
 			end
 
 			dbg(NPC.Name, string.format(
@@ -470,14 +477,25 @@ function DoorOpener.AttackDoor(NPC: Instance, doorModel: Model, attackConfig: {[
 			doorPos = doorModel:GetPivot().Position
 			applyDoorFacingGyro()
 
-			-- Distance check — only swing if actually in range (XZ only).
+			-- Stop any in-progress pathfind before checking distance / swinging.
+			AI.Stop(NPC)
+
+			-- Distance check — 3D distance + Y cap so elevated NPCs can't swing at doors below them.
 			doorPos = getDoorCenter()
-			local currentDist = horizontalDist(npcRoot.Position, doorPos)
+			local currentDist = (npcRoot.Position - doorPos).Magnitude
+			local yDiff = math.abs(npcRoot.Position.Y - doorPos.Y)
+
+			-------
+			if yDiff > maxHeightDiff then
+				-- Too high/low to reach the door — abort so EnemyManager can repath.
+				dbg(NPC.Name, string.format("Y gap too large (%.1f studs) — aborting door attack.", yDiff))
+				break
+			end
+
+			-----
+
 			if currentDist > attackRange + 1 then
-				dbg(NPC.Name, string.format(
-					"Too far from door (%.1f > %.1f) — repositioning before swing.",
-					currentDist, attackRange
-					))
+				dbg(NPC.Name, string.format("Too far from door (%.1f) — repositioning.", currentDist))
 				computeStandPos()
 				moveToAttackPosition()
 				continue
@@ -501,16 +519,19 @@ function DoorOpener.AttackDoor(NPC: Instance, doorModel: Model, attackConfig: {[
 				if dealt then return end
 				dealt = true
 
-				-- Final range check at actual hit moment (XZ only).
-				local distAtHit = horizontalDist(npcRoot.Position, doorModel:GetPivot().Position)
-				if distAtHit > attackRange + 1 then
+				-- Final range check at actual hit moment — 3D + Y cap so elevation blocks damage.
+				local hitPos = doorModel:GetPivot().Position
+				local distAtHit = (npcRoot.Position - hitPos).Magnitude
+				local yDiffAtHit = math.abs(npcRoot.Position.Y - hitPos.Y)
+				-----
+				if distAtHit > attackRange + 1 or yDiffAtHit > maxHeightDiff then
 					dbg(NPC.Name, string.format(
 						"Hit marker fired but NPC too far (%.1f) — damage withheld.",
 						distAtHit
 						))
 					return
 				end
-
+				----
 				local dmg = attackConfig.Damage or 10
 				doorHealth.Value = math.max(0, doorHealth.Value - dmg)
 				dbg(NPC.Name, string.format(
@@ -555,7 +576,8 @@ function DoorOpener.AttackDoor(NPC: Instance, doorModel: Model, attackConfig: {[
 
 			if doorHealth.Value <= 0 then break end
 
-			-- Cooldown between swings.
+			-- Cooldown between swings — hold position so NPC doesn't drift toward player.
+			AI.Stop(NPC)
 			local cooldown = attackConfig.Cooldown or 1
 			local elapsed  = 0
 			dbg(NPC.Name, string.format("Cooldown %.1fs before next swing.", cooldown))
