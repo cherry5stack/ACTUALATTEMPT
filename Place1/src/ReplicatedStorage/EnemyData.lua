@@ -96,13 +96,13 @@ EnemyData["Fighter"] = {
 	PursueRange    = 80,  -- range to STAY engaged once pursuing (NEW)
 	PursueLingerTime = 6, -- seconds after losing all targets before reverting to DetectionRange (NEW)
 	AgentRadius    = 2,
-	AgentHeight    = 5,
+	AgentHeight    = 6,
 	AttackDistance = 5,
 	FaceTargetRange  = 40,
 	DoorCooldown   = 2,
 	Wander = {
 		Enabled           = true,
-		BreaksDoors       = false,
+		BreaksDoors       = true, --determines if whether to open doors during wander state, or act like its and obstacle
 		MinWanderWait     = 1,
 		MaxWanderWait     = 2,
 		MinWanderDistance = 10,
@@ -175,7 +175,7 @@ EnemyData["Fighter"] = {
 	},
 	DoorAttackRange  = 40,
 	DoorAttackHeight = 5,  -- max Y studs above/below door to swing or open
-	BreaksDoors = false,
+	BreaksDoors = true, --attack door if in the wya
 	DoorDamage  = 15, -- fallback used if DoorAttack isn't set
 	DoorAttack  = {
 		AnimationName = "Punch", -- reuse an existing animation in ReplicatedStorage.Animations
@@ -183,6 +183,17 @@ EnemyData["Fighter"] = {
 		Cooldown      = 1,
 		Damage        = 15,
 	},
+	
+	
+	Flee = {
+		Enabled          = true,
+		HealthThreshold  = 0.25,  -- flee when HP drops below 25%
+		FleeSpeed        = 18,    -- walkspeed while fleeing
+		FleeDistance     = 30,    -- how far to run from player
+		ResumeRange      = 40,    -- stop fleeing once player is this far away
+		BreaksDoors      = false, -- whether to open doors while fleeing
+	},
+	
 }
 
 return EnemyData
