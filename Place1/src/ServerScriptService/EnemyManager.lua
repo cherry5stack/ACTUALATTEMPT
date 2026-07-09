@@ -13,7 +13,7 @@ local SmartWanderCtor  = require(rs.SmartWander)
 local PhaseManager     = require(rs.PhaseManager)
 local DoorOpener       = require(rs.DoorOpener)
 
-
+local stuck = StuckRecovery()
 local enemiesFolder = workspace:WaitForChild("Enemies")
 
 local DEBUG              = true
@@ -102,6 +102,12 @@ local function setupEnemy(npc)
 		config.Hooks.PathingFailed = function(npc, reason)
 			defaultPathingFailed(npc, reason)
 			pathFailCount[npc] = (pathFailCount[npc] or 0) + 1
+
+			-- ADD THE CAP HERE
+			if pathFailCount[npc] > 10 then
+				return
+			end
+
 			task.delay(0.6, function()
 				if currentTarget and humanoid.Health > 0 then
 					AI.SmartPathfind(npc, currentTarget)
@@ -136,6 +142,9 @@ local function setupEnemy(npc)
 			MaxWanderWait     = data.Wander.MaxWanderWait or 10,
 			MinWanderDistance = data.Wander.MinWanderDistance or 10,
 			MaxWanderDistance = data.Wander.MaxWanderDistance or 25,
+			AgentRadius       = data.AgentRadius,
+			AgentHeight       = data.AgentHeight,
+			AgentCosts        = data.AgentCosts,
 		})
 	end
 
@@ -175,7 +184,7 @@ local function setupEnemy(npc)
 		local SWAP_DELAY         = 1
 		local pursuitActiveUntil = 0
 
-		local stuck = StuckRecovery()
+	
 
 		local lastDoorCheckTime = 0
 		local DOOR_CHECK_INTERVAL = 1 -- seconds; ComputeAsync is too heavy for every 0.1s tick
@@ -212,9 +221,69 @@ local function setupEnemy(npc)
 			debugGroundCheck(npc, config.AgentInfo.Costs)
 
 			PhaseManager.update(npc, humanoid, AI)
-
+			
 			if PhaseManager.isTransitioning(npc) then
 				stuck.suppress()
+				continue
+			end
+			if stuck.isNPCOnImpassableSurface(npc, config.AgentInfo.Costs) then
+				stuck.suppress()
+				pathFailCount[npc] = 0
+
+				local root = npc:FindFirstChild("HumanoidRootPart")
+				if root and stuck.canAttemptEscape() then
+					stuck.recordEscapeAttempt()
+
+					local floorParams = RaycastParams.new()
+					floorParams.FilterDescendantsInstances = { npc }
+					floorParams.FilterType = Enum.RaycastFilterType.Exclude
+
+					local foundEscape = false
+					local angles = {0, 45, 90, 135, 180, 225, 270, 315}
+					-- try multiple distances, short first since inside a room
+					local distances = {2, 3, 5, 8}
+
+					for _, dist in ipairs(distances) do
+						if foundEscape then break end
+						for _, deg in ipairs(angles) do
+							local rad = math.rad(deg)
+							local dir = Vector3.new(math.cos(rad), 0, math.sin(rad))
+							local testPos = root.Position + dir * dist
+
+							local floorResult = workspace:Raycast(
+								testPos + Vector3.new(0, 3, 0),
+								Vector3.new(0, -8, 0),
+								floorParams
+							)
+
+							if floorResult then
+								local mod = floorResult.Instance:FindFirstChildOfClass("PathfindingModifier")
+								local isImpassable = false
+								if mod and mod.Label and mod.Label ~= "" then
+									local c = config.AgentInfo.Costs[mod.Label]
+									if c == math.huge then isImpassable = true end
+								end
+
+								-- ADD HERE
+								print(string.format("[%s] Escape attempt: dir=%d dist=%d hit='%s' impassable=%s",
+									npc.Name, deg, dist, floorResult.Instance:GetFullName(), tostring(isImpassable)))
+
+								if not isImpassable then
+									humanoid:MoveTo(floorResult.Position + Vector3.new(0, 3, 0))
+									humanoid.Jump = true
+									foundEscape = true
+									break
+								end
+							end
+							
+						end
+					end
+
+					if not foundEscape then
+						AI.Stop(npc)
+					end
+				end
+
 				continue
 			end
 
@@ -380,15 +449,16 @@ local function setupEnemy(npc)
 						else
 							stuck.update(npc)
 						end
-
 						local targetOnImpassable = stuck.isTargetOnImpassableSurface(currentTarget, config.AgentInfo.Costs)
+						local pathBlockedByImpassable = stuck.isPathBlockedByImpassable(npc, currentTarget, config.AgentInfo.Costs)
+						local pathGivenUp = (pathFailCount[npc] or 0) > 10
 
 						if not isAttacking and not DoorOpener.IsBreaking(npc) and stuck.isStuck() then
-							if targetOnImpassable then
+							if targetOnImpassable or pathBlockedByImpassable or pathGivenUp then
 								stuck.suppress()
 								if DEBUG then
 									print(string.format(
-										"[%s] Target is on impassable surface — suppressing stuck recovery.",
+										"[%s] Target unreachable — suppressing stuck recovery.",
 										npc.Name
 										))
 								end
@@ -399,18 +469,14 @@ local function setupEnemy(npc)
 								stuck.attemptUnstuck(npc, currentTarget, AI)
 							end
 						else
-							-- Suppress all movement logic while actively breaking a door.
-							-- DoorOpener.AttackDoor manages its own MoveTo calls during this time
-							-- and AI.SmartPathfind would fight them directly via Forbidden's waypoint loop.
 							if DoorOpener.IsBreaking(npc) then
 								stuck.suppress()
-								AI.Stop(npc) -- cancel any in-progress pathfind toward the player
-								rePathTimer = os.clock() -- reset so it doesn't immediately repath when break ends
+								AI.Stop(npc)
+								rePathTimer = os.clock()
 							else
 								local now = os.clock()
 								local shouldRepath = isAttacking
 									or (now - rePathTimer >= REPATH_INTERVAL)
-
 								if shouldRepath then
 									resetAttackState()
 									rePathTimer = now
