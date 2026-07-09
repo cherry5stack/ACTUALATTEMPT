@@ -12,7 +12,17 @@ return function()
 	local lastMovedTime       = os.clock()
 	local lastUnstuckAttempt  = 0
 	local unstuckAttemptCount = 0
+	
+	local lastEscapeAttempt = 0
+	local ESCAPE_COOLDOWN = 0.5
 
+	function StuckRecovery.canAttemptEscape()
+		return os.clock() - lastEscapeAttempt >= ESCAPE_COOLDOWN
+	end
+
+	function StuckRecovery.recordEscapeAttempt()
+		lastEscapeAttempt = os.clock()
+	end
 	local function getNpcPos(npc)
 		local root = npc:FindFirstChild("HumanoidRootPart")
 		return root and root.Position or Vector3.new(0, 0, 0)
@@ -105,6 +115,58 @@ return function()
 		-- immediately re-fire before the jump plays out
 
 		return true
+	end
+	function StuckRecovery.isPathBlockedByImpassable(npc, target, agentCosts)
+		local root = npc:FindFirstChild("HumanoidRootPart")
+		if not root then return false end
+
+		local targetRoot = target and target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+		if not targetRoot then return false end
+
+		local origin = root.Position
+		local direction = targetRoot.Position - origin
+
+		local params = RaycastParams.new()
+		params.FilterDescendantsInstances = { npc, target.Character }
+		params.FilterType = Enum.RaycastFilterType.Exclude
+
+		-- sample several points along the path
+		local steps = 5
+		for i = 1, steps do
+			local t = i / steps
+			local samplePos = origin + direction * t + Vector3.new(0, 1, 0)
+			local result = workspace:Raycast(samplePos, Vector3.new(0, -6, 0), params)
+			if result then
+				local mod = result.Instance:FindFirstChildOfClass("PathfindingModifier")
+				if mod and mod.Label and mod.Label ~= "" then
+					local cost = agentCosts[mod.Label]
+					if cost == math.huge then
+						return true
+					end
+				end
+			end
+		end
+		return false
+	end
+	function StuckRecovery.isNPCOnImpassableSurface(npc, agentCosts)
+		local root = npc:FindFirstChild("HumanoidRootPart")
+		if not root then return false end
+
+		local params = RaycastParams.new()
+		params.FilterDescendantsInstances = { npc }
+		params.FilterType = Enum.RaycastFilterType.Exclude
+
+		local result = workspace:Raycast(root.Position, Vector3.new(0, -5, 0), params)
+		if not result then return false end
+
+		local modifier = result.Instance:FindFirstChildOfClass("PathfindingModifier")
+		if not modifier then return false end
+
+		local label = modifier.Label
+		if not label or label == "" then return false end
+
+		local cost = agentCosts[label]
+		return cost == math.huge
 	end
 	
 	function StuckRecovery.isTargetOnImpassableSurface(target, agentCosts)
