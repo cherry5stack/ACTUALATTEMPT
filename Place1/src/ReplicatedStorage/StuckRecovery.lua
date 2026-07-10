@@ -107,6 +107,7 @@ return function()
 
 		humanoid.Jump = true
 		humanoid:MoveTo(sideTarget)
+		print(string.format("[StuckRecovery][%s] Sidestepping — attempt %d", npc.Name, unstuckAttemptCount))
 
 		lastUnstuckAttempt = os.clock()
 		unstuckAttemptCount += 1
