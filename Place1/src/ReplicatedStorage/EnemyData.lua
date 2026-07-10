@@ -173,7 +173,7 @@ EnemyData["Fighter"] = {
 		Death    = "FighterDeath",
 		Footstep = "FighterFootstep",
 	},
-	DoorAttackRange  = 40,
+	DoorAttackRange  = 1,
 	DoorAttackHeight = 5,  -- max Y studs above/below door to swing or open
 	BreaksDoors = true, --attack door if in the wya
 	DoorDamage  = 15, -- fallback used if DoorAttack isn't set
