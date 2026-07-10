@@ -15,7 +15,7 @@ local DoorOpener       = require(rs.DoorOpener)
 
 local stuck = StuckRecovery()
 local enemiesFolder = workspace:WaitForChild("Enemies")
-
+local escapingFromImpassable = {} -- [npc] = true while escape pathfind is active
 local DEBUG              = true
 local DEBUG_PRINT_DIST   = true
 local DEBUG_PRINT_GROUND = true
@@ -270,12 +270,41 @@ local function setupEnemy(npc)
 
 								if not isImpassable then
 									local escapePos = floorResult.Position + Vector3.new(0, 3, 0)
-									humanoid:MoveTo(escapePos)
 
-									-- Only jump if the destination is higher than current position
-									if escapePos.Y > root.Position.Y + 1 then
-										humanoid.Jump = true
-									end
+									escapingFromImpassable[npc] = true  -- set flag BEFORE cost change
+
+									local originalCost = config.AgentInfo.Costs["CrackedLava"]
+									config.AgentInfo.Costs["CrackedLava"] = 1
+									config:ApplyNow()
+
+									AI.SmartPathfind(npc, escapePos)
+
+									task.spawn(function()
+										local root = npc:FindFirstChild("HumanoidRootPart")
+										local deadline = os.clock() + 5
+										while os.clock() < deadline do
+											task.wait(0.2)
+											if not root or not root.Parent then break end
+											-- check the actual surface, not the cost
+											local params = RaycastParams.new()
+											params.FilterDescendantsInstances = { npc }
+											params.FilterType = Enum.RaycastFilterType.Exclude
+											local result = workspace:Raycast(root.Position, Vector3.new(0, -5, 0), params)
+											if result then
+												local mod = result.Instance:FindFirstChildOfClass("PathfindingModifier")
+												if not mod or not mod.Label or mod.Label == "" then break end -- off lava
+												local originalLabel = mod.Label
+												-- check against the ORIGINAL cost, not current
+												if originalCost ~= math.huge or originalLabel ~= "CrackedLava" then break end
+											else
+												break
+											end
+										end
+										config.AgentInfo.Costs["CrackedLava"] = originalCost
+										config:ApplyNow()
+										escapingFromImpassable[npc] = nil  -- clear flag
+									end)
+
 									foundEscape = true
 									break
 								end
@@ -344,7 +373,12 @@ local function setupEnemy(npc)
 				-- the "opens every nearby door" problem of proximity-based openers.
 				-- Skip door check during StandStillAfter — the NPC is frozen in place
 				-- and should not start a door break until it's free to move again.
-				if not hasLOS and not DoorOpener.IsBreaking(npc) and not CombatManager.isStandingStill(npc) and os.clock() - lastDoorCheckTime >= DOOR_CHECK_INTERVAL then
+				if not hasLOS 
+					and not DoorOpener.IsBreaking(npc) 
+					and not CombatManager.isStandingStill(npc)
+					and not escapingFromImpassable[npc]  -- use flag, not cost check
+					and os.clock() - lastDoorCheckTime >= DOOR_CHECK_INTERVAL then
+					
 					lastDoorCheckTime = os.clock()
 
 					local targetChar = currentTarget.Character
