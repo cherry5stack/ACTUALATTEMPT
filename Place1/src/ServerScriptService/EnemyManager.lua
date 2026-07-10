@@ -269,8 +269,13 @@ local function setupEnemy(npc)
 									npc.Name, deg, dist, floorResult.Instance:GetFullName(), tostring(isImpassable)))
 
 								if not isImpassable then
-									humanoid:MoveTo(floorResult.Position + Vector3.new(0, 3, 0))
-									humanoid.Jump = true
+									local escapePos = floorResult.Position + Vector3.new(0, 3, 0)
+									humanoid:MoveTo(escapePos)
+
+									-- Only jump if the destination is higher than current position
+									if escapePos.Y > root.Position.Y + 1 then
+										humanoid.Jump = true
+									end
 									foundEscape = true
 									break
 								end
@@ -330,7 +335,8 @@ local function setupEnemy(npc)
 				if DoorOpener.IsBreaking(npc) then
 					stuck.suppress()
 				end
-
+				
+				local hasLOS  = VisionSystem.hasLineOfSight(npc, currentTarget)
 				-- Path-aware door handling for all enemy types, throttled since
 				-- FindBlockingDoor runs a real ComputeAsync. Breakers attack the
 				-- door; non-breakers simply request it open. Both only act on doors
@@ -338,7 +344,7 @@ local function setupEnemy(npc)
 				-- the "opens every nearby door" problem of proximity-based openers.
 				-- Skip door check during StandStillAfter — the NPC is frozen in place
 				-- and should not start a door break until it's free to move again.
-				if not DoorOpener.IsBreaking(npc) and not CombatManager.isStandingStill(npc) and os.clock() - lastDoorCheckTime >= DOOR_CHECK_INTERVAL then
+				if not hasLOS and not DoorOpener.IsBreaking(npc) and not CombatManager.isStandingStill(npc) and os.clock() - lastDoorCheckTime >= DOOR_CHECK_INTERVAL then
 					lastDoorCheckTime = os.clock()
 
 					local targetChar = currentTarget.Character
@@ -385,7 +391,7 @@ local function setupEnemy(npc)
 				end
 
 				local inRange = DistanceManager.isInRange(npc, currentTarget, data)
-				local hasLOS  = VisionSystem.hasLineOfSight(npc, currentTarget)
+				
 				local los     = inRange and hasLOS
 
 				local faceRange       = data.FaceTargetRange or data.AttackDistance
