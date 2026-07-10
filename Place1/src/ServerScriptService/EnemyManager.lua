@@ -457,17 +457,12 @@ local function setupEnemy(npc)
 						end
 						local targetOnImpassable = stuck.isTargetOnImpassableSurface(currentTarget, config.AgentInfo.Costs)
 						local pathBlockedByImpassable = stuck.isPathBlockedByImpassable(npc, currentTarget, config.AgentInfo.Costs)
-						local pathGivenUp = (pathFailCount[npc] or 0) > 10
 
 						if not isAttacking and not DoorOpener.IsBreaking(npc) and stuck.isStuck() then
-							if targetOnImpassable or pathBlockedByImpassable or pathGivenUp then
+							if targetOnImpassable or pathBlockedByImpassable then
 								stuck.suppress()
-								if DEBUG then
-									print(string.format(
-										"[%s] Target unreachable — suppressing stuck recovery.",
-										npc.Name
-										))
-								end
+								-- also stop any active pathfind so NPC doesn't wander off
+								AI.Stop(npc)
 							elseif stuck.shouldEscalateToRepath() then
 								stuck.resetUnstuckAttempts()
 								forceRepath()
@@ -481,12 +476,19 @@ local function setupEnemy(npc)
 								rePathTimer = os.clock()
 							else
 								local now = os.clock()
-								local shouldRepath = isAttacking
-									or (now - rePathTimer >= REPATH_INTERVAL)
+								-- Don't repath if target is on impassable — NPC will just path to wall
+								local shouldRepath = not targetOnImpassable
+									and not pathBlockedByImpassable
+									and (isAttacking or (now - rePathTimer >= REPATH_INTERVAL))
+
 								if shouldRepath then
 									resetAttackState()
 									rePathTimer = now
 									AI.SmartPathfind(npc, currentTarget)
+								elseif targetOnImpassable or pathBlockedByImpassable then
+									-- Target unreachable — hold position and wait
+									AI.Stop(npc)
+									stuck.suppress()
 								end
 							end
 						end
