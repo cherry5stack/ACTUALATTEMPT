@@ -481,8 +481,9 @@ function DoorOpener.AttackDoor(NPC: Instance, doorModel: Model, attackConfig: {[
 			AI.Stop(NPC)
 
 			-- Distance check — 3D distance + Y cap so elevated NPCs can't swing at doors below them.
+			-- Distance check — horizontal only to avoid Y offset from bounding box center
 			doorPos = getDoorCenter()
-			local currentDist = (npcRoot.Position - doorPos).Magnitude
+			local currentDist = horizontalDist(npcRoot.Position, doorPos)  -- was (npcRoot.Position - doorPos).Magnitude
 			local yDiff = math.abs(npcRoot.Position.Y - doorPos.Y)
 
 			-------
@@ -521,7 +522,9 @@ function DoorOpener.AttackDoor(NPC: Instance, doorModel: Model, attackConfig: {[
 
 				-- Final range check at actual hit moment — 3D + Y cap so elevation blocks damage.
 				local hitPos = doorModel:GetPivot().Position
-				local distAtHit = (npcRoot.Position - hitPos).Magnitude
+				local distAtHit = Vector3.new(
+					npcRoot.Position.X - hitPos.X, 0, npcRoot.Position.Z - hitPos.Z
+				).Magnitude
 				local yDiffAtHit = math.abs(npcRoot.Position.Y - hitPos.Y)
 				-----
 				if distAtHit > attackRange + 1 or yDiffAtHit > maxHeightDiff then
