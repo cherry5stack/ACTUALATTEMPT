@@ -373,10 +373,9 @@ local function setupEnemy(npc)
 				-- the "opens every nearby door" problem of proximity-based openers.
 				-- Skip door check during StandStillAfter — the NPC is frozen in place
 				-- and should not start a door break until it's free to move again.
-				if not hasLOS 
-					and not DoorOpener.IsBreaking(npc) 
+				if not DoorOpener.IsBreaking(npc) 
 					and not CombatManager.isStandingStill(npc)
-					and not escapingFromImpassable[npc]  -- use flag, not cost check
+					and not escapingFromImpassable[npc]
 					and os.clock() - lastDoorCheckTime >= DOOR_CHECK_INTERVAL then
 					
 					lastDoorCheckTime = os.clock()
