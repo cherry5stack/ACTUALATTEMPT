@@ -6,7 +6,7 @@ local AI = require(ReplicatedStorage.Forbidden.AI)
 
 local DOOR_TAG = "Door"
 local OPEN_WAIT = 0.5
-local DOOR_PROXIMITY_RANGE = 8 -- studs; should exceed the door's own isNPCInDoorway() close-block radius (5.5)
+local DOOR_PROXIMITY_RANGE =8 -- studs; should exceed the door's own isNPCInDoorway() close-block radius (5.5)
 
 local DEBUG = true
 local busyBreakers: {[Instance]: boolean} = {}
@@ -50,9 +50,12 @@ local PathfindingService = game:GetService("PathfindingService")
 -- This is intentionally NOT called every tick — it's a real ComputeAsync
 -- call, so EnemyManager should throttle it (e.g. once per repath, not once
 -- per 0.1s heartbeat).
-function DoorOpener.FindBlockingDoor(NPC: Instance, TargetPos: Vector3, AgentInfo: {[string]: any}): Model?
+function DoorOpener.FindBlockingDoor(NPC: Instance, TargetPos: Vector3, AgentInfo: {[string]: any}, overrideRange: number?): Model?
 	local npcRoot = NPC:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return nil end
+
+	-- NEW: Use the custom door attack range if provided, otherwise fallback to 8
+	local checkRange = overrideRange or DOOR_PROXIMITY_RANGE
 
 	-- First pass: path-aware detection. Compute route to target and check
 	-- if any waypoint passes near a closed door.
@@ -70,18 +73,15 @@ function DoorOpener.FindBlockingDoor(NPC: Instance, TargetPos: Vector3, AgentInf
 			local doorBBCF, _ = doorModel:GetBoundingBox()
 			local doorCenter   = doorBBCF.Position
 			for _, wp in ipairs(waypoints) do
-				if (wp.Position - doorCenter).Magnitude <= DOOR_PROXIMITY_RANGE then
+				-- NEW: Check against our new checkRange variable
+				if (wp.Position - doorCenter).Magnitude <= checkRange then
 					return doorModel
 				end
 			end
 		end
 	end
 
-	-- Second pass: proximity fallback. If the path failed or no waypoint
-	-- was close enough to a door (e.g. NPC is trapped inside a room and
-	-- the pathfinder can't route through the closed door), check if the
-	-- NPC itself is physically close to any closed door. This catches the
-	-- case where the door is between the NPC and the exit.
+	-- Second pass: proximity fallback.
 	for _, doorModel in ipairs(CollectionService:GetTagged(DOOR_TAG)) do
 		if not doorModel:IsA("Model") then continue end
 		local openValue = doorModel:FindFirstChild("Open")
@@ -89,7 +89,8 @@ function DoorOpener.FindBlockingDoor(NPC: Instance, TargetPos: Vector3, AgentInf
 		local doorBBCF, _ = doorModel:GetBoundingBox()
 		local doorCenter   = doorBBCF.Position
 		local npcDist = (npcRoot.Position - doorCenter).Magnitude
-		if npcDist <= DOOR_PROXIMITY_RANGE then
+		-- NEW: Check against our new checkRange variable
+		if npcDist <= checkRange then
 			return doorModel
 		end
 	end
@@ -167,7 +168,7 @@ function DoorOpener.RequestOpen(NPC: Instance, doorModel: Model, attackRange: nu
 		-- Yields=true would hang forever if AI.Stop cancels the pathfind mid-way.
 		AI.SmartPathfind(NPC, standPos, false)
 
-		local deadline = os.clock() + 6
+		local deadline = os.clock() + 6 --door open time
 		while os.clock() < deadline do
 			task.wait(0.1)
 			if not doorModel.Parent then return end
@@ -375,7 +376,7 @@ function DoorOpener.AttackDoor(NPC: Instance, doorModel: Model, attackConfig: {[
 		return
 	end
 
-	local attackRange    = math.max(attackConfig.AttackRange or 5, 2)
+	local attackRange    = math.max(attackConfig.AttackRange)
 	local maxHeightDiff  = attackConfig.MaxHeightDiff or 5
 
 	-- Use the bounding box center rather than pivot — pivot placement varies
