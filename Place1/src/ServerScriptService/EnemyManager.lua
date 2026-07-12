@@ -98,16 +98,23 @@ local function setupEnemy(npc)
 		config.Tracking.Enabled = true
 		config.DirectMoveTo.Enabled = false
 		config.Hooks.GoalReached = nil
-		config.Hooks.PathfindingLinkReached = DoorOpener.onPathfindingLinkReached
+		config.Hooks.PathfindingLinkReached = function(NPC, WP)
+			if not WP.Label or not string.find(string.lower(WP.Label), "door") then
+				return true
+			end
+			if data.BreaksDoors then
+				-- Breakers don't open doors via link — stop and let FindBlockingDoor handle it
+				AI.Stop(NPC)
+				return true
+			end
+			return DoorOpener.onPathfindingLinkReached(NPC, WP)
+		end
 		config.Hooks.PathingFailed = function(npc, reason)
 			defaultPathingFailed(npc, reason)
 			pathFailCount[npc] = (pathFailCount[npc] or 0) + 1
-
-			-- ADD THE CAP HERE
 			if pathFailCount[npc] > 10 then
 				return
 			end
-
 			task.delay(0.6, function()
 				if currentTarget and humanoid.Health > 0 then
 					AI.SmartPathfind(npc, currentTarget)
@@ -211,6 +218,15 @@ local function setupEnemy(npc)
 
 		while npc.Parent ~= nil and humanoid.Health > 0 do
 			task.wait(0.1)
+			
+			-- ========================================================
+			-- ADD THIS GUARD CLAUSE HERE:
+			-- This prevents the rest of the loop from running 
+			-- and trying to move the NPC while it's busy.
+			-- ========================================================
+			if DoorOpener.IsBreaking(npc) then
+				continue 
+			end
 
 			if humanoid.Health <= 0 then break end
 
@@ -377,13 +393,17 @@ local function setupEnemy(npc)
 					and not CombatManager.isStandingStill(npc)
 					and not escapingFromImpassable[npc]
 					and os.clock() - lastDoorCheckTime >= DOOR_CHECK_INTERVAL then
-					
+
 					lastDoorCheckTime = os.clock()
 
 					local targetChar = currentTarget.Character
 					local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
 					if targetRoot then
-						local blockingDoor = DoorOpener.FindBlockingDoor(npc, targetRoot.Position, config.AgentInfo)
+						-- NEW: Define the search range using the EnemyData stats
+						local doorSearchRange =  data.AttackDistance or 5
+
+						-- NEW: Pass the doorSearchRange into FindBlockingDoor
+						local blockingDoor = DoorOpener.FindBlockingDoor(npc, targetRoot.Position, config.AgentInfo, doorSearchRange)
 						if blockingDoor then
 							if data.BreaksDoors then
 								if DEBUG then
@@ -395,7 +415,7 @@ local function setupEnemy(npc)
 									AttackSpeed    = data.DoorAttack and data.DoorAttack.AttackSpeed or 1,
 									Cooldown       = data.DoorAttack and data.DoorAttack.Cooldown or 1,
 									Damage         = data.DoorDamage or 10,
-									AttackRange    = data.DoorAttackRange or data.AttackDistance or 5,
+									AttackRange    =  data.AttackDistance or 5,
 									MaxHeightDiff  = data.DoorAttackHeight or 5,
 								}, function()
 									if currentTarget and humanoid.Health > 0 then
@@ -408,7 +428,7 @@ local function setupEnemy(npc)
 								if DEBUG then
 									print(string.format("[%s] Door '%s' is blocking — opening it.", npc.Name, blockingDoor:GetFullName()))
 								end
-								DoorOpener.RequestOpen(npc, blockingDoor, data.DoorAttackRange or data.AttackDistance or 5, data.DoorAttackHeight or 5)
+								DoorOpener.RequestOpen(npc, blockingDoor,  data.AttackDistance or 5, data.DoorAttackHeight or 5)
 							end
 						end
 					end
