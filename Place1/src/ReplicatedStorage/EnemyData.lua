@@ -97,7 +97,7 @@ EnemyData["Fighter"] = {
 	PursueLingerTime = 6, -- seconds after losing all targets before reverting to DetectionRange (NEW)
 	AgentRadius    = 2,
 	AgentHeight    = 6,
-	AttackDistance = 5,
+	AttackDistance = 15,
 	FaceTargetRange  = 40,
 	DoorCooldown   = 2,
 	Wander = {
@@ -173,7 +173,7 @@ EnemyData["Fighter"] = {
 		Death    = "FighterDeath",
 		Footstep = "FighterFootstep",
 	},
-	DoorAttackRange  = 1,
+
 	DoorAttackHeight = 5,  -- max Y studs above/below door to swing or open
 	BreaksDoors = true, --attack door if in the wya
 	DoorDamage  = 15, -- fallback used if DoorAttack isn't set
