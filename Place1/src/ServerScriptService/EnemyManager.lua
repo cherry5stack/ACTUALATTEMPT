@@ -410,12 +410,13 @@ local function setupEnemy(npc)
 									print(string.format("[%s] Door '%s' is blocking — attacking it.", npc.Name, blockingDoor:GetFullName()))
 								end
 								AI.Stop(npc)
+								-- EnemyManager.lua
 								DoorOpener.AttackDoor(npc, blockingDoor, {
 									AnimationName  = data.DoorAttack and data.DoorAttack.AnimationName or "Punch",
 									AttackSpeed    = data.DoorAttack and data.DoorAttack.AttackSpeed or 1,
 									Cooldown       = data.DoorAttack and data.DoorAttack.Cooldown or 1,
 									Damage         = data.DoorDamage or 10,
-									AttackRange    =  data.AttackDistance or 5,
+									AttackRange    = (data.DoorAttack and data.DoorAttack.AttackRange) or 5,  -- was data.AttackDistance
 									MaxHeightDiff  = data.DoorAttackHeight or 5,
 								}, function()
 									if currentTarget and humanoid.Health > 0 then
