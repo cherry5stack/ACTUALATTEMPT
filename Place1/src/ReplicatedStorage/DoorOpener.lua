@@ -50,15 +50,12 @@ local PathfindingService = game:GetService("PathfindingService")
 -- This is intentionally NOT called every tick — it's a real ComputeAsync
 -- call, so EnemyManager should throttle it (e.g. once per repath, not once
 -- per 0.1s heartbeat).
-function DoorOpener.FindBlockingDoor(NPC: Instance, TargetPos: Vector3, AgentInfo: {[string]: any}, overrideRange: number?): Model?
+function DoorOpener.FindBlockingDoor(NPC, TargetPos, AgentInfo, overrideRange)
 	local npcRoot = NPC:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return nil end
 
-	-- NEW: Use the custom door attack range if provided, otherwise fallback to 8
 	local checkRange = overrideRange or DOOR_PROXIMITY_RANGE
 
-	-- First pass: path-aware detection. Compute route to target and check
-	-- if any waypoint passes near a closed door.
 	local path = PathfindingService:CreatePath(AgentInfo)
 	local ok = pcall(function()
 		path:ComputeAsync(npcRoot.Position, TargetPos)
@@ -71,9 +68,8 @@ function DoorOpener.FindBlockingDoor(NPC: Instance, TargetPos: Vector3, AgentInf
 			local openValue = doorModel:FindFirstChild("Open")
 			if not openValue or openValue.Value == true then continue end
 			local doorBBCF, _ = doorModel:GetBoundingBox()
-			local doorCenter   = doorBBCF.Position
+			local doorCenter = doorBBCF.Position
 			for _, wp in ipairs(waypoints) do
-				-- NEW: Check against our new checkRange variable
 				if (wp.Position - doorCenter).Magnitude <= checkRange then
 					return doorModel
 				end
@@ -81,20 +77,7 @@ function DoorOpener.FindBlockingDoor(NPC: Instance, TargetPos: Vector3, AgentInf
 		end
 	end
 
-	-- Second pass: proximity fallback.
-	for _, doorModel in ipairs(CollectionService:GetTagged(DOOR_TAG)) do
-		if not doorModel:IsA("Model") then continue end
-		local openValue = doorModel:FindFirstChild("Open")
-		if not openValue or openValue.Value == true then continue end
-		local doorBBCF, _ = doorModel:GetBoundingBox()
-		local doorCenter   = doorBBCF.Position
-		local npcDist = (npcRoot.Position - doorCenter).Magnitude
-		-- NEW: Check against our new checkRange variable
-		if npcDist <= checkRange then
-			return doorModel
-		end
-	end
-
+	-- No proximity fallback — if the path doesn't go through the door, it's not blocking.
 	return nil
 end
 
