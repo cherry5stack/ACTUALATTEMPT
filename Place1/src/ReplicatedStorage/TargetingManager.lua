@@ -1,15 +1,23 @@
 local TargetingManager = {}
 
 local Players = game:GetService("Players")
+local StuckRecovery = require(game.ReplicatedStorage.StuckRecovery)() -- adjust path to match your project
 
-function TargetingManager.getTarget(npc, data, overrideRange, overrideHeightLimit)
+-- overrideAgentCosts (optional): pass config.AgentInfo.Costs to make this
+-- NPC skip past players standing on terrain that's impassable for it,
+-- instead of fixating on an unreachable target.
+function TargetingManager.getTarget(npc, data, overrideRange, overrideHeightLimit, overrideAgentCosts)
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return nil end
 
 	local searchRange = overrideRange or data.DetectionRange
 	local heightLimit = overrideHeightLimit or data.DetectionHeightLimit -- nil = no height restriction
+	local agentCosts  = overrideAgentCosts -- nil = skip reachability check entirely
 
-	local closest, closestDist = nil, math.huge
+	-- Collect all valid, in-range candidates sorted by distance, so we can
+	-- fall through to the next-closest reachable player instead of just
+	-- rejecting the single closest one and returning nil.
+	local candidates = {}
 
 	for _, player in Players:GetPlayers() do
 		local char = player.Character
@@ -30,13 +38,21 @@ function TargetingManager.getTarget(npc, data, overrideRange, overrideHeightLimi
 			root.Position.Z - npcRoot.Position.Z
 		).Magnitude
 
-		if horizontalDist < closestDist and horizontalDist < searchRange then
-			closest = player
-			closestDist = horizontalDist
+		if horizontalDist < searchRange then
+			table.insert(candidates, { player = player, dist = horizontalDist, root = root, char = char })
 		end
 	end
 
-	return closest
+	table.sort(candidates, function(a, b) return a.dist < b.dist end)
+
+	for _, candidate in ipairs(candidates) do
+		if not agentCosts
+			or not StuckRecovery.isPositionOnImpassableSurface(candidate.root.Position, agentCosts, { candidate.char }) then
+			return candidate.player
+		end
+	end
+
+	return nil
 end
 
 return TargetingManager
