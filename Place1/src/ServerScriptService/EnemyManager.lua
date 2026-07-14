@@ -15,11 +15,11 @@ local DoorOpener       = require(rs.DoorOpener)
 
 local stuck = StuckRecovery()
 local enemiesFolder = workspace:WaitForChild("Enemies")
-local escapingFromImpassable = {} -- [npc] = true while escape pathfind is active
+local escapingFromImpassable = {}
 local DEBUG              = true
-local DEBUG_PRINT_DIST   = true
-local DEBUG_PRINT_GROUND = true
-local DEBUG_PRINT_FACE   = true
+local DEBUG_PRINT_DIST   = false
+local DEBUG_PRINT_GROUND = false
+local DEBUG_PRINT_FACE   = false
 
 local REPATH_INTERVAL    = 0.5
 local lastFootstep       = {}
@@ -60,8 +60,6 @@ local function debugGroundCheck(npc, agentCosts)
 		end
 	end
 end
-
-
 
 
 local function setupEnemy(npc)
@@ -190,15 +188,15 @@ local function setupEnemy(npc)
 		local rePathTimer        = 0
 		local SWAP_DELAY         = 1
 		local pursuitActiveUntil = 0
-
-	
+		local seekingEdge        = false -- true while NPC is pathing to lava edge
 
 		local lastDoorCheckTime = 0
-		local DOOR_CHECK_INTERVAL = 1 -- seconds; ComputeAsync is too heavy for every 0.1s tick
+		local DOOR_CHECK_INTERVAL = 1
 
 		local function resetAttackState()
 			isAttacking    = false
 			attackStandPos = nil
+			seekingEdge    = false
 		end
 
 		local function forceRepath()
@@ -218,14 +216,9 @@ local function setupEnemy(npc)
 
 		while npc.Parent ~= nil and humanoid.Health > 0 do
 			task.wait(0.1)
-			
-			-- ========================================================
-			-- ADD THIS GUARD CLAUSE HERE:
-			-- This prevents the rest of the loop from running 
-			-- and trying to move the NPC while it's busy.
-			-- ========================================================
+
 			if DoorOpener.IsBreaking(npc) then
-				continue 
+				continue
 			end
 
 			if humanoid.Health <= 0 then break end
@@ -237,11 +230,13 @@ local function setupEnemy(npc)
 			debugGroundCheck(npc, config.AgentInfo.Costs)
 
 			PhaseManager.update(npc, humanoid, AI)
-			
+
 			if PhaseManager.isTransitioning(npc) then
 				stuck.suppress()
 				continue
 			end
+
+			-- ── NPC ON IMPASSABLE: escape first ──────────────────────────
 			if stuck.isNPCOnImpassableSurface(npc, config.AgentInfo.Costs) then
 				stuck.suppress()
 				pathFailCount[npc] = 0
@@ -256,7 +251,6 @@ local function setupEnemy(npc)
 
 					local foundEscape = false
 					local angles = {0, 45, 90, 135, 180, 225, 270, 315}
-					-- try multiple distances, short first since inside a room
 					local distances = {2, 3, 5, 8}
 
 					for _, dist in ipairs(distances) do
@@ -280,14 +274,10 @@ local function setupEnemy(npc)
 									if c == math.huge then isImpassable = true end
 								end
 
-								-- ADD HERE
-								print(string.format("[%s] Escape attempt: dir=%d dist=%d hit='%s' impassable=%s",
-									npc.Name, deg, dist, floorResult.Instance:GetFullName(), tostring(isImpassable)))
-
 								if not isImpassable then
 									local escapePos = floorResult.Position + Vector3.new(0, 3, 0)
 
-									escapingFromImpassable[npc] = true  -- set flag BEFORE cost change
+									escapingFromImpassable[npc] = true
 
 									local originalCost = config.AgentInfo.Costs["CrackedLava"]
 									config.AgentInfo.Costs["CrackedLava"] = 1
@@ -296,36 +286,32 @@ local function setupEnemy(npc)
 									AI.SmartPathfind(npc, escapePos)
 
 									task.spawn(function()
-										local root = npc:FindFirstChild("HumanoidRootPart")
+										local r = npc:FindFirstChild("HumanoidRootPart")
 										local deadline = os.clock() + 5
 										while os.clock() < deadline do
 											task.wait(0.2)
-											if not root or not root.Parent then break end
-											-- check the actual surface, not the cost
-											local params = RaycastParams.new()
-											params.FilterDescendantsInstances = { npc }
-											params.FilterType = Enum.RaycastFilterType.Exclude
-											local result = workspace:Raycast(root.Position, Vector3.new(0, -5, 0), params)
-											if result then
-												local mod = result.Instance:FindFirstChildOfClass("PathfindingModifier")
-												if not mod or not mod.Label or mod.Label == "" then break end -- off lava
-												local originalLabel = mod.Label
-												-- check against the ORIGINAL cost, not current
-												if originalCost ~= math.huge or originalLabel ~= "CrackedLava" then break end
+											if not r or not r.Parent then break end
+											local p = RaycastParams.new()
+											p.FilterDescendantsInstances = { npc }
+											p.FilterType = Enum.RaycastFilterType.Exclude
+											local res = workspace:Raycast(r.Position, Vector3.new(0, -5, 0), p)
+											if res then
+												local m = res.Instance:FindFirstChildOfClass("PathfindingModifier")
+												if not m or not m.Label or m.Label == "" then break end
+												if originalCost ~= math.huge or m.Label ~= "CrackedLava" then break end
 											else
 												break
 											end
 										end
 										config.AgentInfo.Costs["CrackedLava"] = originalCost
 										config:ApplyNow()
-										escapingFromImpassable[npc] = nil  -- clear flag
+										escapingFromImpassable[npc] = nil
 									end)
 
 									foundEscape = true
 									break
 								end
 							end
-							
 						end
 					end
 
@@ -337,12 +323,12 @@ local function setupEnemy(npc)
 				continue
 			end
 
+			-- ── TARGET DETECTION ─────────────────────────────────────────
 			local inPursuitWindow   = os.clock() < pursuitActiveUntil
 			local searchRange       = inPursuitWindow and (data.PursueRange or data.DetectionRange) or data.DetectionRange
 			local searchHeightLimit = inPursuitWindow and (data.PursueHeightLimit or data.DetectionHeightLimit) or data.DetectionHeightLimit
 
-			local newTarget = TargetingManager.getTarget(npc, data, searchRange, searchHeightLimit)
-
+			local newTarget = TargetingManager.getTarget(npc, data, searchRange, searchHeightLimit, config.AgentInfo.Costs)
 			if newTarget ~= currentTarget then
 				if newTarget == nil or os.clock() - swapTimer >= SWAP_DELAY then
 					local hadTarget = currentTarget ~= nil
@@ -376,20 +362,14 @@ local function setupEnemy(npc)
 			if currentTarget then
 				pursuitActiveUntil = os.clock() + (data.PursueLingerTime or 0)
 
-				-- Suppress stuck recovery while actively breaking a door
 				if DoorOpener.IsBreaking(npc) then
 					stuck.suppress()
 				end
-				
-				local hasLOS  = VisionSystem.hasLineOfSight(npc, currentTarget)
-				-- Path-aware door handling for all enemy types, throttled since
-				-- FindBlockingDoor runs a real ComputeAsync. Breakers attack the
-				-- door; non-breakers simply request it open. Both only act on doors
-				-- that are actually on the computed route to the target, avoiding
-				-- the "opens every nearby door" problem of proximity-based openers.
-				-- Skip door check during StandStillAfter — the NPC is frozen in place
-				-- and should not start a door break until it's free to move again.
-				if not DoorOpener.IsBreaking(npc) 
+
+				local hasLOS = VisionSystem.hasLineOfSight(npc, currentTarget)
+
+				-- ── DOOR CHECK ───────────────────────────────────────────
+				if not DoorOpener.IsBreaking(npc)
 					and not CombatManager.isStandingStill(npc)
 					and not escapingFromImpassable[npc]
 					and os.clock() - lastDoorCheckTime >= DOOR_CHECK_INTERVAL then
@@ -399,10 +379,7 @@ local function setupEnemy(npc)
 					local targetChar = currentTarget.Character
 					local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
 					if targetRoot then
-						-- NEW: Define the search range using the EnemyData stats
-						local doorSearchRange =  data.AttackDistance or 5
-
-						-- NEW: Pass the doorSearchRange into FindBlockingDoor
+						local doorSearchRange = data.AttackDistance or 5
 						local blockingDoor = DoorOpener.FindBlockingDoor(npc, targetRoot.Position, config.AgentInfo, doorSearchRange)
 						if blockingDoor then
 							if data.BreaksDoors then
@@ -410,13 +387,12 @@ local function setupEnemy(npc)
 									print(string.format("[%s] Door '%s' is blocking — attacking it.", npc.Name, blockingDoor:GetFullName()))
 								end
 								AI.Stop(npc)
-								-- EnemyManager.lua
 								DoorOpener.AttackDoor(npc, blockingDoor, {
 									AnimationName  = data.DoorAttack and data.DoorAttack.AnimationName or "Punch",
 									AttackSpeed    = data.DoorAttack and data.DoorAttack.AttackSpeed or 1,
 									Cooldown       = data.DoorAttack and data.DoorAttack.Cooldown or 1,
 									Damage         = data.DoorDamage or 10,
-									AttackRange    = (data.DoorAttack and data.DoorAttack.AttackRange) or 5,  -- was data.AttackDistance
+									AttackRange    = (data.DoorAttack and data.DoorAttack.AttackRange) or 5,
 									MaxHeightDiff  = data.DoorAttackHeight or 5,
 								}, function()
 									if currentTarget and humanoid.Health > 0 then
@@ -429,13 +405,24 @@ local function setupEnemy(npc)
 								if DEBUG then
 									print(string.format("[%s] Door '%s' is blocking — opening it.", npc.Name, blockingDoor:GetFullName()))
 								end
-								DoorOpener.RequestOpen(npc, blockingDoor,  data.AttackDistance or 5, data.DoorAttackHeight or 5)
+								DoorOpener.RequestOpen(npc, blockingDoor, data.AttackDistance or 5, data.DoorAttackHeight or 5)
 							end
 						end
 					end
 				end
 
-				local dist = DistanceManager.getDistance(npc, currentTarget)
+				-- ── DISTANCE / LOS ───────────────────────────────────────
+				local dist    = DistanceManager.getDistance(npc, currentTarget)
+				local inRange = DistanceManager.isInRange(npc, currentTarget, data)
+
+				local targetOnImpassable = stuck.isTargetOnImpassableSurface(currentTarget, config.AgentInfo.Costs)
+
+				-- Don't enter attack mode if target is on impassable — path to edge instead
+				local los = inRange and hasLOS and not targetOnImpassable
+
+				local faceRange       = data.FaceTargetRange or data.AttackDistance
+				local withinFaceRange = dist <= faceRange
+				local faceLos         = withinFaceRange and hasLOS
 
 				if DEBUG_PRINT_DIST then
 					print(string.format(
@@ -444,18 +431,11 @@ local function setupEnemy(npc)
 						))
 				end
 
-				local inRange = DistanceManager.isInRange(npc, currentTarget, data)
-				
-				local los     = inRange and hasLOS
-
-				local faceRange       = data.FaceTargetRange or data.AttackDistance
-				local withinFaceRange = dist <= faceRange
-				local faceLos         = withinFaceRange and hasLOS
-
 				if DEBUG_PRINT_FACE then
 					print(string.format(
-						"[%s] dist=%.1f faceRange=%.1f within=%s hasLOS=%s faceLos=%s autoRotate=%s",
-						npc.Name, dist, faceRange, tostring(withinFaceRange), tostring(hasLOS), tostring(faceLos), tostring(humanoid.AutoRotate)
+						"[%s] dist=%.1f faceRange=%.1f within=%s hasLOS=%s faceLos=%s autoRotate=%s targetOnImpassable=%s",
+						npc.Name, dist, faceRange, tostring(withinFaceRange), tostring(hasLOS),
+						tostring(faceLos), tostring(humanoid.AutoRotate), tostring(targetOnImpassable)
 						))
 				end
 
@@ -467,6 +447,7 @@ local function setupEnemy(npc)
 					VisionSystem.stopFacing(npc)
 				end
 
+				-- ── ATTACK ───────────────────────────────────────────────
 				if los then
 					if not isAttacking then
 						AI.Stop(npc)
@@ -486,8 +467,7 @@ local function setupEnemy(npc)
 					CombatManager.tryAttack(npc, currentTarget, data)
 
 				else
-					-- StandStillAfter: NPC just cast an attack and is frozen in place.
-					-- Suppress all movement and stuck checks for the duration.
+					-- ── STANDSITLL AFTER ─────────────────────────────────
 					if CombatManager.isStandingStill(npc) then
 						stuck.suppress()
 						AI.Stop(npc)
@@ -501,6 +481,7 @@ local function setupEnemy(npc)
 							CombatManager.tryAttack(npc, currentTarget, data)
 						end
 					else
+						-- ── STUCK TRACKING ───────────────────────────────
 						if npc:GetAttribute("CrossingDoor") then
 							stuck.suppress()
 							pathFailCount[npc] = 0
@@ -509,13 +490,26 @@ local function setupEnemy(npc)
 						else
 							stuck.update(npc)
 						end
-						local targetOnImpassable = stuck.isTargetOnImpassableSurface(currentTarget, config.AgentInfo.Costs)
-						local pathBlockedByImpassable = stuck.isPathBlockedByImpassable(npc, currentTarget, config.AgentInfo.Costs)
 
-						if not isAttacking and not DoorOpener.IsBreaking(npc) and stuck.isStuck() then
-							if targetOnImpassable or pathBlockedByImpassable then
+						local pathGivenUp = (pathFailCount[npc] or 0) > 5
+						--local pathBlockedByImpassable = stuck.isPathBlockedByImpassable(npc, currentTarget, config.AgentInfo.Costs)
+
+						-- ── TARGET ON IMPASSABLE: seek nearest LOS edge ──
+						if targetOnImpassable then
+							-- Can't reach target — give up and enter wander/standstill
+							AI.Stop(npc)
+							currentTarget = nil
+							resetAttackState()
+							stuck.resetUnstuckAttempts()
+							stuck.suppress()
+							VisionSystem.stopFacing(npc)
+							humanoid.AutoRotate = true
+							lastCombatEndTime = os.clock()
+
+							-- ── STUCK RECOVERY ───────────────────────────────
+						elseif not isAttacking and not DoorOpener.IsBreaking(npc) and stuck.isStuck() then
+							if pathGivenUp then
 								stuck.suppress()
-								-- also stop any active pathfind so NPC doesn't wander off
 								AI.Stop(npc)
 							elseif stuck.shouldEscalateToRepath() then
 								stuck.resetUnstuckAttempts()
@@ -530,25 +524,18 @@ local function setupEnemy(npc)
 								rePathTimer = os.clock()
 							else
 								local now = os.clock()
-								-- Don't repath if target is on impassable — NPC will just path to wall
-								local shouldRepath = not targetOnImpassable
-									and not pathBlockedByImpassable
-									and (isAttacking or (now - rePathTimer >= REPATH_INTERVAL))
-
+								local shouldRepath = isAttacking or (now - rePathTimer >= REPATH_INTERVAL)
 								if shouldRepath then
 									resetAttackState()
 									rePathTimer = now
 									AI.SmartPathfind(npc, currentTarget)
-								elseif targetOnImpassable or pathBlockedByImpassable then
-									-- Target unreachable — hold position and wait
-									AI.Stop(npc)
-									stuck.suppress()
 								end
 							end
 						end
 					end
 				end
 			else
+				-- ── WANDER ───────────────────────────────────────────────
 				local postCombatDelay = (data.Wander and data.Wander.PostCombatDelay) or 0
 				local delayElapsed    = os.clock() - lastCombatEndTime >= postCombatDelay
 
