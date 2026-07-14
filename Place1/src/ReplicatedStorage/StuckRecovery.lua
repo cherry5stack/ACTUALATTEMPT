@@ -117,6 +117,11 @@ return function()
 
 		return true
 	end
+	
+	
+	
+
+	
 	function StuckRecovery.isPathBlockedByImpassable(npc, target, agentCosts)
 		local root = npc:FindFirstChild("HumanoidRootPart")
 		if not root then return false end
@@ -149,15 +154,28 @@ return function()
 		end
 		return false
 	end
-	function StuckRecovery.isNPCOnImpassableSurface(npc, agentCosts)
-		local root = npc:FindFirstChild("HumanoidRootPart")
-		if not root then return false end
+	
+	
+	-- ─────────────────────────────────────────────────────────────
+	-- SHARED IMPASSABLE-SURFACE CHECK (raw position based)
+	-- ─────────────────────────────────────────────────────────────
+
+	-- Raw check: is this world position standing on a PathfindingModifier-
+	-- labelled part whose cost (per agentCosts) is impassable (math.huge)
+	-- for this NPC? No modifier / no matching cost entry = reachable.
+	-- This is the single source of truth — isNPCOnImpassableSurface,
+	-- isTargetOnImpassableSurface, and TargetingManager's reachability
+	-- filter all call into this instead of raycasting independently.
+	function StuckRecovery.isPositionOnImpassableSurface(position, agentCosts, filterInstances)
+		if not agentCosts then return false end
 
 		local params = RaycastParams.new()
-		params.FilterDescendantsInstances = { npc }
 		params.FilterType = Enum.RaycastFilterType.Exclude
+		if filterInstances then
+			params.FilterDescendantsInstances = filterInstances
+		end
 
-		local result = workspace:Raycast(root.Position, Vector3.new(0, -5, 0), params)
+		local result = workspace:Raycast(position, Vector3.new(0, -5, 0), params)
 		if not result then return false end
 
 		local modifier = result.Instance:FindFirstChildOfClass("PathfindingModifier")
@@ -166,31 +184,23 @@ return function()
 		local label = modifier.Label
 		if not label or label == "" then return false end
 
-		local cost = agentCosts[label]
-		return cost == math.huge
+		return agentCosts[label] == math.huge
 	end
-	
+
+	function StuckRecovery.isNPCOnImpassableSurface(npc, agentCosts)
+		local root = npc:FindFirstChild("HumanoidRootPart")
+		if not root then return false end
+
+		return StuckRecovery.isPositionOnImpassableSurface(root.Position, agentCosts, { npc })
+	end
+
 	function StuckRecovery.isTargetOnImpassableSurface(target, agentCosts)
 		if not target or not target.Character then return false end
 
 		local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
 		if not targetRoot then return false end
 
-		local params = RaycastParams.new()
-		params.FilterDescendantsInstances = { target.Character }
-		params.FilterType = Enum.RaycastFilterType.Exclude
-
-		local result = workspace:Raycast(targetRoot.Position, Vector3.new(0, -5, 0), params)
-		if not result then return false end
-
-		local modifier = result.Instance:FindFirstChildOfClass("PathfindingModifier")
-		if not modifier then return false end
-
-		local label = modifier.Label
-		if not label or label == "" then return false end
-
-		local cost = agentCosts[label]
-		return cost == math.huge
+		return StuckRecovery.isPositionOnImpassableSurface(targetRoot.Position, agentCosts, { target.Character })
 	end
 
 	function StuckRecovery.shouldEscalateToRepath()
@@ -210,6 +220,6 @@ return function()
 			if k == "MaxUnstuckAttempts"   then MAX_UNSTUCK_ATTEMPTS  = v end
 		end
 	end
-
+	
 	return StuckRecovery
 end
