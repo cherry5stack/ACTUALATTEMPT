@@ -97,7 +97,7 @@ EnemyData["Fighter"] = {
 	PursueLingerTime = 6, -- seconds after losing all targets before reverting to DetectionRange (NEW)
 	AgentRadius    = 2,
 	AgentHeight    = 6,
-	AttackDistance = 15,
+	AttackDistance = 5,
 	FaceTargetRange  = 40,
 	DoorCooldown   = 2,
 	Wander = {
@@ -175,13 +175,15 @@ EnemyData["Fighter"] = {
 	},
 
 	DoorAttackHeight = 5,  -- max Y studs above/below door to swing or open
-	BreaksDoors = true, --attack door if in the wya
+	BreaksDoors = false, --attack door if in the wya
 	DoorDamage  = 15, -- fallback used if DoorAttack isn't set
-	DoorAttack  = {
-		AnimationName = "Punch", -- reuse an existing animation in ReplicatedStorage.Animations
+	-- EnemyData.lua
+	DoorAttack = {
+		AnimationName = "Punch",
 		AttackSpeed   = 1,
 		Cooldown      = 1,
 		Damage        = 15,
+		AttackRange   = 5,   -- NEW: standoff distance specific to door melee
 	},
 	
 	
