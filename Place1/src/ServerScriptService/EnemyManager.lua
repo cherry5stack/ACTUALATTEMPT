@@ -24,6 +24,8 @@ local DEBUG_PRINT_FACE   = false
 local REPATH_INTERVAL    = 0.5
 local lastFootstep       = {}
 local pathFailCount      = {}
+local PATHFAIL_WANDER_THRESHOLD = 4  -- consecutive PathingFailed hits before giving up on this target
+local recentlyDroppedTarget = {}     -- [npc] = {player = Player, until_ = os.clock()+N}
 
 local function debugGroundCheck(npc, agentCosts)
 	if not DEBUG_PRINT_GROUND then return end
@@ -110,7 +112,8 @@ local function setupEnemy(npc)
 		config.Hooks.PathingFailed = function(npc, reason)
 			defaultPathingFailed(npc, reason)
 			pathFailCount[npc] = (pathFailCount[npc] or 0) + 1
-			if pathFailCount[npc] > 10 then
+			if pathFailCount[npc] >= PATHFAIL_WANDER_THRESHOLD then
+				-- main loop will drop the target and hand off to wander/standstill
 				return
 			end
 			task.delay(0.6, function()
@@ -161,6 +164,7 @@ local function setupEnemy(npc)
 		end
 		lastFootstep[npc] = nil
 		pathFailCount[npc] = nil
+		recentlyDroppedTarget[npc] = nil
 		if wander then wander.stopWandering(npc, AI) end
 		AI.Stop(npc)
 		CombatManager.cleanup(npc)
@@ -328,7 +332,15 @@ local function setupEnemy(npc)
 			local searchRange       = inPursuitWindow and (data.PursueRange or data.DetectionRange) or data.DetectionRange
 			local searchHeightLimit = inPursuitWindow and (data.PursueHeightLimit or data.DetectionHeightLimit) or data.DetectionHeightLimit
 
-			local newTarget = TargetingManager.getTarget(npc, data, searchRange, searchHeightLimit, config.AgentInfo.Costs)
+			local newTarget = TargetingManager.getTarget(npc, data, searchRange, searchHeightLimit, config.AgentInfo.Costs, config.AgentInfo)
+			-- Don't immediately re-acquire a target we just gave up on due to
+			-- repeated pathfind failures — avoids a drop/re-target stutter loop.
+			if newTarget and recentlyDroppedTarget[npc]
+				and recentlyDroppedTarget[npc].player == newTarget
+				and os.clock() < recentlyDroppedTarget[npc].until_ then
+				newTarget = nil
+			end
+
 			if newTarget ~= currentTarget then
 				if newTarget == nil or os.clock() - swapTimer >= SWAP_DELAY then
 					local hadTarget = currentTarget ~= nil
@@ -355,6 +367,7 @@ local function setupEnemy(npc)
 						if hadTarget then
 							lastCombatEndTime = os.clock()
 						end
+						pursuitActiveUntil = 0
 					end
 				end
 			end
@@ -491,12 +504,11 @@ local function setupEnemy(npc)
 							stuck.update(npc)
 						end
 
-						local pathGivenUp = (pathFailCount[npc] or 0) > 5
-						--local pathBlockedByImpassable = stuck.isPathBlockedByImpassable(npc, currentTarget, config.AgentInfo.Costs)
+						local pathGivenUp = (pathFailCount[npc] or 0) >= PATHFAIL_WANDER_THRESHOLD
+						local pathBlockedByImpassable = stuck.isPathBlockedByImpassable(npc, currentTarget, config.AgentInfo.Costs)
 
-						-- ── TARGET ON IMPASSABLE: seek nearest LOS edge ──
+						-- ── TARGET ON IMPASSABLE: give up and enter wander/standstill ──
 						if targetOnImpassable then
-							-- Can't reach target — give up and enter wander/standstill
 							AI.Stop(npc)
 							currentTarget = nil
 							resetAttackState()
@@ -505,12 +517,25 @@ local function setupEnemy(npc)
 							VisionSystem.stopFacing(npc)
 							humanoid.AutoRotate = true
 							lastCombatEndTime = os.clock()
+							pursuitActiveUntil = 0   -- ADD THIS
 
 							-- ── STUCK RECOVERY ───────────────────────────────
 						elseif not isAttacking and not DoorOpener.IsBreaking(npc) and stuck.isStuck() then
-							if pathGivenUp then
-								stuck.suppress()
+							if pathGivenUp or pathBlockedByImpassable then
+								if DEBUG then
+									print(string.format("[%s] Dropping target — %d consecutive path failures.", npc.Name, pathFailCount[npc]))
+								end
 								AI.Stop(npc)
+								recentlyDroppedTarget[npc] = { player = currentTarget, until_ = os.clock() + 8 }
+								currentTarget = nil
+								resetAttackState()
+								stuck.resetUnstuckAttempts()
+								stuck.suppress()
+								VisionSystem.stopFacing(npc)
+								humanoid.AutoRotate = true
+								lastCombatEndTime = os.clock()
+								pathFailCount[npc] = 0
+								pursuitActiveUntil = 0   -- ADD THIS
 							elseif stuck.shouldEscalateToRepath() then
 								stuck.resetUnstuckAttempts()
 								forceRepath()
@@ -550,7 +575,9 @@ local function setupEnemy(npc)
 			CombatManager.cleanup(npc)
 			VisionSystem.stopFacing(npc)
 			pathFailCount[npc] = nil
+			recentlyDroppedTarget[npc] = nil
 			lastFootstep[npc] = nil
+			TargetingManager.clearReachabilityCache(npc)
 		end
 	end)
 end
