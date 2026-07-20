@@ -6,9 +6,9 @@ local RESPONSIVENESS = 2500 -- higher = snappier turning, tune by feel (try 5-12
 -- ─────────────────────────────────────────────
 -- DEBUG CONFIG
 -- ─────────────────────────────────────────────
-local DEBUG              = false
+local DEBUG              = true
 local DEBUG_RAY_LIFETIME = 0.15
-local DEBUG_PRINT_LOS    = false
+local DEBUG_PRINT_LOS    = true
 
 -- ─────────────────────────────────────────────
 -- Internal helpers
@@ -66,18 +66,16 @@ function VisionSystem.hasLineOfSight(npc, target)
 		targetRoot.Position + Vector3.new(0, -2, 0),  -- legs
 	}
 
-	local hasLOS = false
+	local blockedCount = 0
 
 	for _, point in targetPoints do
 		local direction = point - npcEye
 		local result = workspace:Raycast(npcEye, direction, params)
 
 		if result == nil then
-			-- clear
 			drawDebugRay(npcEye, direction, Color3.fromRGB(60, 255, 60))
-			hasLOS = true
 		else
-			-- blocked
+			blockedCount += 1
 			drawDebugRay(npcEye, direction, Color3.fromRGB(255, 60, 60))
 			if DEBUG_PRINT_LOS then
 				print(string.format(
@@ -88,6 +86,8 @@ function VisionSystem.hasLineOfSight(npc, target)
 			end
 		end
 	end
+
+	local hasLOS = blockedCount == 0  -- require ALL rays clear, not just one
 
 	if DEBUG_PRINT_LOS and hasLOS then
 		local npcRoot2 = npc:FindFirstChild("HumanoidRootPart")
