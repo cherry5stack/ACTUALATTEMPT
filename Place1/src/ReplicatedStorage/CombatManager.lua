@@ -204,16 +204,18 @@ function CombatManager.tryAttack(npc, target, data)
 	local timeAlive = os.clock() - (spawnTimes[npc] or os.clock())
 	local npcPos = npcRoot.Position
 	local targetPos = targetRoot.Position
-	local dist = Vector3.new(npcPos.X - targetPos.X, 0, npcPos.Z - targetPos.Z).Magnitude
+	local horizontalDist = Vector3.new(npcPos.X - targetPos.X, 0, npcPos.Z - targetPos.Z).Magnitude
+	local heightDiff = math.abs(npcPos.Y - targetPos.Y)
 
 	local validAttacks = {}
 	for _, attack in ipairs(data.Attacks) do
 		if not attack then continue end
 		if attack.UnlockAfter and timeAlive < attack.UnlockAfter then continue end
 		if attack.RequiresPhase and PhaseManager.getCurrentPhase(npc) < attack.RequiresPhase then continue end
+		if attack.AttackHeight and heightDiff > attack.AttackHeight then continue end  -- NEW
 
 		local lastTime = lastAttackTimes[npc][attack.Name] or 0
-		if dist <= attack.Range and os.clock() - lastTime >= (attack.Cooldown or 0) then
+		if horizontalDist <= attack.Range and os.clock() - lastTime >= (attack.Cooldown or 0) then
 			table.insert(validAttacks, attack)
 		end
 	end
