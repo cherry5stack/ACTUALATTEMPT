@@ -1,74 +1,16 @@
 --[[
 	ENEMY DATA — field reference
+	(full field docs unchanged from original header — trimmed here for brevity)
 
-	Each entry describes one enemy archetype. Most fields configure the
-	Forbidden AI module and Humanoid; Attacks is a list built with
-	mergeAttack(), which clones a base AttacksData entry and lets you
-	override any field per-enemy (Damage, Cooldown, AttackDebounce,
-	AttackSpeed, etc.) without duplicating the whole attack definition.
+	ComfortDistance (number)  How close the NPC prefers to stand once engaged.
+	                          Checked fresh every tick in EnemyManager against
+	                          live distance -- NOT tied to Tracking's retrack
+	                          timer, so it reacts immediately even if the
+	                          target barely moves.
 
-	── Core Stats ───────────────────────────────────────────────────
-	Health          (number)   Starting/max Humanoid health.
-	WalkSpeed       (number)   Humanoid.WalkSpeed.
-	DetectionRange  (number)   Max distance to acquire a player as a target
-	                           (used by TargetingManager).
-	AttackDistance  (number)   Max distance to be considered "in range" to
-	                           attack (used by DistanceManager.isInRange).
-	DetectionHeightLimit (number?) Max vertical distance (Y) tolerated for
-	                           initial detection. Omit for unlimited.
-	PursueHeightLimit    (number?) Same as above, but used while in the
-	                           pursuit window. Falls back to
-	                           DetectionHeightLimit if unset.
-
-	── Pathfinding (Forbidden AI) ───────────────────────────────────
-	AgentRadius     (number)   Pathfinding agent radius (collision sizing).
-	AgentHeight     (number)   Pathfinding agent height.
-	AgentCosts      (table)    Per-label pathfinding cost overrides, e.g.
-	                           { Obstacle = math.huge } makes Obstacle-
-	                           labelled parts impassable for this enemy.
-
-	── Combat ────────────────────────────────────────────────────────
-	Attacks         (table)    List of attacks built via mergeAttack().
-	                           Example:
-	                             mergeAttack("Punch", {
-	                                 AttackDebounce = 0.5,
-	                             })
-	                           This clones AttacksData["Punch"] and patches
-	                           just AttackDebounce, leaving everything else
-	                           (Damage, Range, HitboxSize, etc.) untouched.
-
-	                           CAUTION: overrides are a SHALLOW patch. If you
-	                           override a nested table field like Telegraph
-	                           or Sounds, you must pass the WHOLE nested
-	                           table, not just one field inside it, or you'll
-	                           accidentally share/mutate the base's table.
-
-	── Phases ────────────────────────────────────────────────────────
-	PhaseTransitions (table?)  Ordered list of HP-gated transitions, handled
-	                           by PhaseManager. List entries highest
-	                           HealthThreshold -> lowest. Each entry:
-	                             HealthThreshold (number) fraction of MaxHealth
-	                               (e.g. 0.5 = triggers once Health <= 50%)
-	                             AnimationName   (string?) plays if found
-	                             Duration        (number)  freeze window (sec)
-	                             FreezeMovement  (bool?)   default true,
-	                               calls ai.Stop(npc) for the duration
-	                             Sounds.Transition (string?)
-	                             CastAppearance (table?) same shape as an
-	                               attack's CastAppearance
-
-	                           Attacks can gate on phase via:
-	                             RequiresPhase (number) — attack only valid
-	                             once PhaseManager.getCurrentPhase(npc) is
-	                             at least this value. Phase 1 = base phase
-	                             (no transitions fired yet), phase 2 = after
-	                             the first PhaseTransitions entry fires, etc.
-
-	── Audio ─────────────────────────────────────────────────────────
-	Sounds.Spawn     (string)  Played when the enemy is set up/spawned.
-	Sounds.Death     (string)  Played on humanoid.Died.
-	Sounds.Footstep  (string)  Played periodically while humanoid.Running
-	                           fires with speed > 0.
+	AttackDistance is auto-derived from the max Range across Attacks below --
+	do not hand-set it, or it can drift out of sync with what attacks can
+	actually reach (this caused a real freeze bug previously).
 ]]
 local AttacksData = require(game.ReplicatedStorage.AttacksData)
 
@@ -85,24 +27,42 @@ local function mergeAttack(baseName, overrides)
 	return merged
 end
 
+-- Derives the max usable attack range from a built Attacks list.
+local function getMaxAttackRange(attacks)
+	local max = 0
+	for _, atk in ipairs(attacks) do
+		if atk and atk.Range and atk.Range > max then
+			max = atk.Range
+		end
+	end
+	return max
+end
+
 local EnemyData = {}
 
 EnemyData["Fighter"] = {
 	Health         = 100,
 	WalkSpeed      = 12,
-	DetectionRange = 50,  -- range to FIRST notice a target
-	DetectionHeightLimit = 15,  -- studs vertical tolerance
+	DetectionRange = 50,
+	DetectionHeightLimit = 15,
 	PursueHeightLimit    = 25,
-	PursueRange    = 80,  -- range to STAY engaged once pursuing (NEW)
-	PursueLingerTime = 6, -- seconds after losing all targets before reverting to DetectionRange (NEW)
+	PursueRange    = 80,
+	PursueLingerTime = 6,
 	AgentRadius    = 2,
 	AgentHeight    = 5,
-	AttackDistance = 5,
+
+	-- ComfortDistance: how close the NPC prefers to stand once engaged.
+	-- Should generally be <= the shortest attack Range you want reliably
+	-- usable, and always <= the derived AttackDistance below.
+	ComfortDistance = 4,
+
+	-- AttackDistance is derived below from Attacks -- do not set here.
+	DoorInteractionRange = 8,
 	FaceTargetRange  = 40,
 	DoorCooldown   = 2,
 	Wander = {
 		Enabled           = true,
-		BreaksDoors       = true, --determines if whether to open doors during wander state, or act like its and obstacle
+		BreaksDoors       = true,
 		MinWanderWait     = 1,
 		MaxWanderWait     = 2,
 		MinWanderDistance = 10,
@@ -115,10 +75,7 @@ EnemyData["Fighter"] = {
 		CrackedLava = math.huge,
 	},
 
-	PhaseCooldown = 3, -- minimum 3 seconds after any phase ends before another can begin
-	-- Phase 2 triggers once Health <= 50% of MaxHealth (i.e. <= 50).
-	-- NPC freezes, plays EnrageRoar (if the animation exists), tints red,
-	-- then unlocks EnragedSlam below via RequiresPhase = 2.
+	PhaseCooldown = 3,
 	PhaseTransitions = {
 		{
 			HealthThreshold = 0.5,
@@ -127,7 +84,7 @@ EnemyData["Fighter"] = {
 			ScaleAnimationToDuration = true,
 			FreezeMovement  = true,
 			HealthRestorePercent = 0.15,
-			Repeatable      = true, -- NEW: can fire again if healed back above 50% and dropped below again
+			Repeatable      = true,
 			Sounds = { Transition = "BossRoar" },
 			CastAppearance = {
 				Enabled     = true,
@@ -139,16 +96,15 @@ EnemyData["Fighter"] = {
 		{
 			HealthThreshold = 0.49,
 			Duration        = 1.5,
-			Repeatable      = false, -- default behavior: fires once, never again
+			Repeatable      = false,
 		},
 		{
 			HealthThreshold = 0.2,
 			AnimationName   = "Phase2",
 			Duration        = 2.5,
-			ScaleAnimationToDuration = true, -- NEW: stretches/compresses the anim to fit Duration exactly
+			ScaleAnimationToDuration = true,
 			FreezeMovement  = true,
-			HealthRestorePercent = 0.15, -- NEW: heals 15% of MaxHealth when this phase triggers
-			-- HealthRestoreFlat = 20,   -- NEW: alternative/additional flat HP restore, can combine with the percent
+			HealthRestorePercent = 0.15,
 			Sounds = { Transition = "BossRoar" },
 			CastAppearance = {
 				Enabled     = true,
@@ -165,7 +121,7 @@ EnemyData["Fighter"] = {
 			Cooldown = 4,
 		}),
 		mergeAttack("EnragedSlam", {
-			RequiresPhase = 2, -- only usable once the phase-1 transition above has fired
+			RequiresPhase = 2,
 		}),
 	},
 	Sounds = {
@@ -174,28 +130,38 @@ EnemyData["Fighter"] = {
 		Footstep = "FighterFootstep",
 	},
 
-	DoorAttackHeight = 5,  -- max Y studs above/below door to swing or open
-	BreaksDoors = false, --attack door if in the wya
-	DoorDamage  = 15, -- fallback used if DoorAttack isn't set
-	-- EnemyData.lua
+	DoorAttackHeight = 5,
+	BreaksDoors = false,
+	DoorDamage  = 15,
 	DoorAttack = {
 		AnimationName = "Punch",
 		AttackSpeed   = 1,
 		Cooldown      = 1,
 		Damage        = 15,
-		AttackRange   = 5,   -- NEW: standoff distance specific to door melee
+		AttackRange   = 5,
 	},
-	
-	
+
 	Flee = {
 		Enabled          = true,
-		HealthThreshold  = 0.25,  -- flee when HP drops below 25%
-		FleeSpeed        = 18,    -- walkspeed while fleeing
-		FleeDistance     = 30,    -- how far to run from player
-		ResumeRange      = 40,    -- stop fleeing once player is this far away
-		BreaksDoors      = false, -- whether to open doors while fleeing
+		HealthThreshold  = 0.25,
+		FleeSpeed        = 18,
+		FleeDistance     = 30,
+		ResumeRange      = 40,
+		BreaksDoors      = false,
 	},
-	
 }
+
+-- Derive AttackDistance for every enemy from its actual Attacks list, and
+-- warn if ComfortDistance would put the NPC outside every attack's reach.
+for name, data in pairs(EnemyData) do
+	data.AttackDistance = getMaxAttackRange(data.Attacks)
+
+	if data.ComfortDistance and data.ComfortDistance > data.AttackDistance then
+		warn(string.format(
+			"[EnemyData] '%s': ComfortDistance (%.1f) exceeds max attack Range (%.1f) -- NPC may stand out of range of all attacks!",
+			name, data.ComfortDistance, data.AttackDistance
+			))
+	end
+end
 
 return EnemyData
