@@ -24,8 +24,8 @@ local DEBUG_PRINT_FACE   = false
 local REPATH_INTERVAL    = 0.5
 local lastFootstep       = {}
 local pathFailCount      = {}
-local PATHFAIL_WANDER_THRESHOLD = 4  -- consecutive PathingFailed hits before giving up on this target
-local recentlyDroppedTarget = {}     -- [npc] = {player = Player, until_ = os.clock()+N}
+local PATHFAIL_WANDER_THRESHOLD = 4
+local recentlyDroppedTarget = {}
 
 local function debugGroundCheck(npc, agentCosts)
 	if not DEBUG_PRINT_GROUND then return end
@@ -88,6 +88,13 @@ local function setupEnemy(npc)
 
 	local config = AI.GetConfig(npc)
 
+	-- NEW: updated every tick in the main loop below. Read by the
+	-- PathingFailed hook so it can tell the difference between "failed to
+	-- find an initial path to the target" (should count toward giving up)
+	-- and "failed to find a path to get CLOSER while already fighting"
+	-- (harmless -- attacking doesn't require a path at all).
+	local currentLOS = false
+
 	local function defaultPathingFailed(npc, reason)
 		if DEBUG then
 			print(string.format("[%s] Pathing failed — %s", npc.Name, reason))
@@ -103,7 +110,6 @@ local function setupEnemy(npc)
 				return true
 			end
 			if data.BreaksDoors then
-				-- Breakers don't open doors via link — stop and let FindBlockingDoor handle it
 				AI.Stop(NPC)
 				return true
 			end
@@ -111,9 +117,18 @@ local function setupEnemy(npc)
 		end
 		config.Hooks.PathingFailed = function(npc, reason)
 			defaultPathingFailed(npc, reason)
+
+			-- Failed APPROACH pathfinds while we already have LOS on the
+			-- target are harmless -- we're already able to fight, we just
+			-- can't get physically closer (e.g. target is on an unreachable
+			-- ledge, or wedged somewhere the navmesh can't route to). Don't
+			-- count these toward the give-up threshold, or a legitimate
+			-- ongoing fight gets aborted into wander the moment repath
+			-- attempts start failing while combat is working fine.
+			if currentLOS then return end
+
 			pathFailCount[npc] = (pathFailCount[npc] or 0) + 1
 			if pathFailCount[npc] >= PATHFAIL_WANDER_THRESHOLD then
-				-- main loop will drop the target and hand off to wander/standstill
 				return
 			end
 			task.delay(0.6, function()
@@ -125,7 +140,7 @@ local function setupEnemy(npc)
 	end
 
 	config.Tracking.Enabled                       = true
-	config.Tracking.CollinearTargetPositionOffset  = 0
+	config.Tracking.CollinearTargetPositionOffset  = 0 -- unused: distance-holding is handled per-tick in the loop below, not via DirectMoveTo offset
 	config.AgentInfo.AgentRadius                  = data.AgentRadius
 	config.AgentInfo.AgentHeight                  = data.AgentHeight
 	config.AgentInfo.Costs = data.AgentCosts or { Obstacle = math.huge, Door = 1 }
@@ -186,21 +201,17 @@ local function setupEnemy(npc)
 
 	task.spawn(function()
 		local currentTarget      = nil
-		local isAttacking        = false
-		local attackStandPos     = nil
 		local swapTimer          = 0
 		local rePathTimer        = 0
 		local SWAP_DELAY         = 1
 		local pursuitActiveUntil = 0
-		local seekingEdge        = false -- true while NPC is pathing to lava edge
+		local seekingEdge        = false
 
 		local lastDoorCheckTime = 0
 		local DOOR_CHECK_INTERVAL = 1
 
 		local function resetAttackState()
-			isAttacking    = false
-			attackStandPos = nil
-			seekingEdge    = false
+			seekingEdge = false
 		end
 
 		local function forceRepath()
@@ -332,13 +343,48 @@ local function setupEnemy(npc)
 			local searchRange       = inPursuitWindow and (data.PursueRange or data.DetectionRange) or data.DetectionRange
 			local searchHeightLimit = inPursuitWindow and (data.PursueHeightLimit or data.DetectionHeightLimit) or data.DetectionHeightLimit
 
-			local newTarget = TargetingManager.getTarget(npc, data, searchRange, searchHeightLimit, config.AgentInfo.Costs, config.AgentInfo)
-			-- Don't immediately re-acquire a target we just gave up on due to
-			-- repeated pathfind failures — avoids a drop/re-target stutter loop.
-			if newTarget and recentlyDroppedTarget[npc]
-				and recentlyDroppedTarget[npc].player == newTarget
-				and os.clock() < recentlyDroppedTarget[npc].until_ then
-				newTarget = nil
+			-- If the current target is still alive, within weapon range, and visible,
+			-- keep it as-is this tick without re-running target search. This is what
+			-- stops the NPC from reverting to wander mid-fight just because a barrier
+			-- or missing navmesh made pathing fail -- attacking doesn't need a path.
+			local keepCurrentTarget = false
+			if currentTarget then
+				local targetChar = currentTarget.Character
+				local targetHum   = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
+				if targetChar and targetHum and targetHum.Health > 0 then
+					local liveDist = DistanceManager.getDistance(npc, currentTarget)
+					local liveLOS  = VisionSystem.hasLineOfSight(npc, currentTarget)
+					if liveDist <= data.AttackDistance and liveLOS then
+						keepCurrentTarget = true
+					end
+				end
+			end
+
+			local newTarget
+			if keepCurrentTarget then
+				newTarget = currentTarget
+			else
+				newTarget = TargetingManager.getTarget(npc, data, searchRange, searchHeightLimit, config.AgentInfo.Costs, config.AgentInfo, data.AttackDistance)
+
+				if newTarget and recentlyDroppedTarget[npc]
+					and recentlyDroppedTarget[npc].player == newTarget
+					and os.clock() < recentlyDroppedTarget[npc].until_ then
+
+					-- The drop-cooldown exists to stop a rapid drop/reacquire
+					-- thrash loop when a target is genuinely unreachable. But
+					-- if the target is ALREADY within weapon range and
+					-- visible right now, there's no thrash risk -- it's
+					-- simply attackable, so let it back in immediately
+					-- instead of waiting out the fixed cooldown window.
+					local liveDist = DistanceManager.getDistance(npc, newTarget)
+					local liveLOS  = VisionSystem.hasLineOfSight(npc, newTarget)
+
+					if liveDist <= data.AttackDistance and liveLOS then
+						recentlyDroppedTarget[npc] = nil -- situation has changed, clear the cooldown
+					else
+						newTarget = nil
+					end
+				end
 			end
 
 			if newTarget ~= currentTarget then
@@ -380,6 +426,19 @@ local function setupEnemy(npc)
 				end
 
 				local hasLOS = VisionSystem.hasLineOfSight(npc, currentTarget)
+				currentLOS = hasLOS -- NEW: keep the PathingFailed hook's view of LOS current
+
+				-- Seeing the target at all means we're not "lost" -- reset
+				-- the give-up counter here (not just inside the stricter
+				-- `los` branch below, which also requires being in
+				-- AttackDistance and the target not being on impassable
+				-- ground). Without this, brief LOS flicker near geometry
+				-- (visible as alternating LOS CLEAR/BLOCKED in logs) could
+				-- let pathFailCount silently climb during an otherwise fine
+				-- fight and eventually trigger a false "dropping target".
+				if hasLOS then
+					pathFailCount[npc] = 0
+				end
 
 				-- ── DOOR CHECK ───────────────────────────────────────────
 				if not DoorOpener.IsBreaking(npc)
@@ -392,7 +451,12 @@ local function setupEnemy(npc)
 					local targetChar = currentTarget.Character
 					local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
 					if targetRoot then
-						local doorSearchRange = data.AttackDistance or 5
+						-- Door search/approach range is intentionally separate from
+						-- AttackDistance (weapon reach) -- they're unrelated concepts
+						-- and AttackDistance can be large (e.g. long-range attacks),
+						-- which would otherwise make the NPC search for and "approach"
+						-- doors from way too far out.
+						local doorSearchRange = data.DoorInteractionRange or 8
 						local blockingDoor = DoorOpener.FindBlockingDoor(npc, targetRoot.Position, config.AgentInfo, doorSearchRange)
 						if blockingDoor then
 							if data.BreaksDoors then
@@ -418,7 +482,7 @@ local function setupEnemy(npc)
 								if DEBUG then
 									print(string.format("[%s] Door '%s' is blocking — opening it.", npc.Name, blockingDoor:GetFullName()))
 								end
-								DoorOpener.RequestOpen(npc, blockingDoor, data.AttackDistance or 5, data.DoorAttackHeight or 5)
+								DoorOpener.RequestOpen(npc, blockingDoor, data.DoorInteractionRange or 8, data.DoorAttackHeight or 5)
 							end
 						end
 					end
@@ -430,7 +494,6 @@ local function setupEnemy(npc)
 
 				local targetOnImpassable = stuck.isTargetOnImpassableSurface(currentTarget, config.AgentInfo.Costs)
 
-				-- Don't enter attack mode if target is on impassable — path to edge instead
 				local los = inRange and hasLOS and not targetOnImpassable
 
 				local faceRange       = data.FaceTargetRange or data.AttackDistance
@@ -461,26 +524,58 @@ local function setupEnemy(npc)
 				end
 
 				-- ── ATTACK ───────────────────────────────────────────────
+				-- Distance-holding is checked FRESH every tick here, fully
+				-- decoupled from Tracking's internal retrack timer. This is
+				-- what prevents the "sniping from max range and never
+				-- closing to ComfortDistance" bug: we don't wait for
+				-- Tracking's DynamicRetrack timer or distance-moved
+				-- threshold to decide whether to keep approaching.
 				if los then
-					if not isAttacking then
-						AI.Stop(npc)
-						isAttacking = true
-						local root = npc:FindFirstChild("HumanoidRootPart")
-						attackStandPos = root and root.Position or nil
-					end
-
-					rePathTimer = os.clock()
 					stuck.suppress()
 					pathFailCount[npc] = 0
 
-					if attackStandPos then
-						humanoid:MoveTo(attackStandPos)
+					local comfortDist = data.ComfortDistance or data.AttackDistance or 4
+
+					if dist <= comfortDist then
+						-- Close enough — hold position and fight.
+						AI.Stop(npc)
+						rePathTimer = os.clock() -- avoid an immediate repath the instant we drift back out
+					else
+						-- Within AttackDistance (so an attack could technically
+						-- reach) but still farther than we want to stand —
+						-- keep closing the gap, throttled by REPATH_INTERVAL.
+						if os.clock() - rePathTimer >= REPATH_INTERVAL then
+							-- NEW: path to a point short of the target's exact
+							-- position (pulled back toward the NPC by
+							-- comfortDist) instead of the raw player instance.
+							-- Without this, SmartPathfind aims at the player's
+							-- exact root position, so if they're hugging a
+							-- wall/corner the NPC walks right up against that
+							-- same geometry instead of stopping at comfortDist.
+							local targetChar = currentTarget.Character
+							local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+							local npcRootPart = npc:FindFirstChild("HumanoidRootPart")
+
+							if targetRoot and npcRootPart then
+								local delta = targetRoot.Position - npcRootPart.Position
+								local flatDelta = Vector3.new(delta.X, 0, delta.Z)
+								if flatDelta.Magnitude > comfortDist then
+									local standPos = targetRoot.Position - flatDelta.Unit * comfortDist
+									AI.SmartPathfind(npc, standPos)
+								end
+							end
+
+							rePathTimer = os.clock()
+						end
+					end
+
+					if CombatManager.isStandingStill(npc) then
+						AI.Stop(npc)
 					end
 
 					CombatManager.tryAttack(npc, currentTarget, data)
 
 				else
-					-- ── STANDSITLL AFTER ─────────────────────────────────
 					if CombatManager.isStandingStill(npc) then
 						stuck.suppress()
 						AI.Stop(npc)
@@ -507,7 +602,6 @@ local function setupEnemy(npc)
 						local pathGivenUp = (pathFailCount[npc] or 0) >= PATHFAIL_WANDER_THRESHOLD
 						local pathBlockedByImpassable = stuck.isPathBlockedByImpassable(npc, currentTarget, config.AgentInfo.Costs)
 
-						-- ── TARGET ON IMPASSABLE: give up and enter wander/standstill ──
 						if targetOnImpassable then
 							AI.Stop(npc)
 							currentTarget = nil
@@ -517,10 +611,9 @@ local function setupEnemy(npc)
 							VisionSystem.stopFacing(npc)
 							humanoid.AutoRotate = true
 							lastCombatEndTime = os.clock()
-							pursuitActiveUntil = 0   -- ADD THIS
+							pursuitActiveUntil = 0
 
-							-- ── STUCK RECOVERY ───────────────────────────────
-						elseif not isAttacking and not DoorOpener.IsBreaking(npc) and stuck.isStuck() then
+						elseif not DoorOpener.IsBreaking(npc) and stuck.isStuck() then
 							if pathGivenUp or pathBlockedByImpassable then
 								if DEBUG then
 									print(string.format("[%s] Dropping target — %d consecutive path failures.", npc.Name, pathFailCount[npc]))
@@ -535,7 +628,7 @@ local function setupEnemy(npc)
 								humanoid.AutoRotate = true
 								lastCombatEndTime = os.clock()
 								pathFailCount[npc] = 0
-								pursuitActiveUntil = 0   -- ADD THIS
+								pursuitActiveUntil = 0
 							elseif stuck.shouldEscalateToRepath() then
 								stuck.resetUnstuckAttempts()
 								forceRepath()
@@ -549,9 +642,8 @@ local function setupEnemy(npc)
 								rePathTimer = os.clock()
 							else
 								local now = os.clock()
-								local shouldRepath = isAttacking or (now - rePathTimer >= REPATH_INTERVAL)
+								local shouldRepath = (now - rePathTimer >= REPATH_INTERVAL)
 								if shouldRepath then
-									resetAttackState()
 									rePathTimer = now
 									AI.SmartPathfind(npc, currentTarget)
 								end
@@ -560,6 +652,7 @@ local function setupEnemy(npc)
 					end
 				end
 			else
+				currentLOS = false -- NEW: no target, nothing to see
 				-- ── WANDER ───────────────────────────────────────────────
 				local postCombatDelay = (data.Wander and data.Wander.PostCombatDelay) or 0
 				local delayElapsed    = os.clock() - lastCombatEndTime >= postCombatDelay
