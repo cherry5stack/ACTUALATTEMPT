@@ -39,7 +39,15 @@ end
 -- overrideAgentInfo (optional): pass config.AgentInfo (the full table, not
 -- just Costs) to enable a real pathfind reachability check on top of the
 -- cheap impassable-tile check. Skipped entirely if nil.
-function TargetingManager.getTarget(npc, data, overrideRange, overrideHeightLimit, overrideAgentCosts, overrideAgentInfo)
+-- guaranteedEngageRange (optional): typically data.AttackDistance. A
+-- candidate already within this distance doesn't need a walkable path to be
+-- engageable at all -- attacking doesn't require pathfinding (see
+-- EnemyManager.tryAttack / CombatManager). Without this bypass, an NPC
+-- standing near but not navmesh-reachable (elevated ledge, thin gap, across
+-- a barrier, etc.) would never even be OFFERED as a target despite being
+-- fully attackable right now, since the reachability/impassable checks
+-- below would always reject it first.
+function TargetingManager.getTarget(npc, data, overrideRange, overrideHeightLimit, overrideAgentCosts, overrideAgentInfo, guaranteedEngageRange)
 	local npcRoot = npc:FindFirstChild("HumanoidRootPart")
 	if not npcRoot then return nil end
 
@@ -77,11 +85,13 @@ function TargetingManager.getTarget(npc, data, overrideRange, overrideHeightLimi
 	table.sort(candidates, function(a, b) return a.dist < b.dist end)
 
 	for _, candidate in ipairs(candidates) do
-		if agentCosts and StuckRecovery.isPositionOnImpassableSurface(candidate.root.Position, agentCosts, { candidate.char }) then
+		local guaranteedEngage = guaranteedEngageRange and candidate.dist <= guaranteedEngageRange
+
+		if not guaranteedEngage and agentCosts and StuckRecovery.isPositionOnImpassableSurface(candidate.root.Position, agentCosts, { candidate.char }) then
 			continue -- cheap check: skip lava/impassable-tile standers
 		end
 
-		if agentInfo and not isTargetReachable(npc, candidate.char, agentInfo) then
+		if not guaranteedEngage and agentInfo and not isTargetReachable(npc, candidate.char, agentInfo) then
 			continue -- expensive check: skip actually-unreachable candidates (cached)
 		end
 
