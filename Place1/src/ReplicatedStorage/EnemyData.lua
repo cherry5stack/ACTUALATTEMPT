@@ -131,7 +131,7 @@ EnemyData["Fighter"] = {
 	},
 
 	DoorAttackHeight = 5,
-	BreaksDoors = false,
+	BreaksDoors = true,
 	DoorDamage  = 15,
 	DoorAttack = {
 		AnimationName = "Punch",
